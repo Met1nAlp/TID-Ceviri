@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="tr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Türk İşaret Dili Çeviri Sistemi</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <h1>TÜRK İŞARET DİLİ ÇEVİRİ SİSTEMİ</h1>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Video Section -->
+            <div class="video-section">
+                <div class="video-container">
+                    <img id="videoFeed" src="{{ url_for('video_feed') }}" alt="Video Stream">
+                    <div class="video-overlay" id="videoOverlay">
+                        <span class="loading-text">Kamera bekleniyor...</span>
+                    </div>
+                </div>
+
+                <!-- Sentence Builder -->
+                <div class="sentence-section">
+                    <div class="sentence-header">
+                        <h3>Cümle:</h3>
+                    </div>
+                    <div class="sentence-container" id="sentenceContainer">
+                        <span class="empty-sentence">Kelime eklemek için yukarıdaki tahminlere tıklayın</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Predictions Panel -->
+            <div class="predictions-panel">
+                <h2>Tespit Edilen Kelimeler</h2>
+
+                <div class="predictions-list" id="predictionsList">
+                    <div class="prediction-item prediction-1" data-index="0">
+                        <span class="prediction-label" id="pred1Label">-</span>
+                        <div class="prediction-bar-container">
+                            <div class="prediction-bar" id="pred1Bar"></div>
+                        </div>
+                        <span class="prediction-confidence" id="pred1Conf">0%</span>
+                    </div>
+
+                    <div class="prediction-item prediction-2" data-index="1">
+                        <span class="prediction-label" id="pred2Label">-</span>
+                        <div class="prediction-bar-container">
+                            <div class="prediction-bar" id="pred2Bar"></div>
+                        </div>
+                        <span class="prediction-confidence" id="pred2Conf">0%</span>
+                    </div>
+
+                    <div class="prediction-item prediction-3" data-index="2">
+                        <span class="prediction-label" id="pred3Label">-</span>
+                        <div class="prediction-bar-container">
+                            <div class="prediction-bar" id="pred3Bar"></div>
+                        </div>
+                        <span class="prediction-confidence" id="pred3Conf">0%</span>
+                    </div>
+                </div>
+
+                <!-- Control Buttons -->
+                <div class="control-buttons">
+                    <button class="btn btn-secondary" id="clearPredictions">
+                        Kelimeleri Temizle
+                    </button>
+                    <button class="btn btn-danger" id="clearSentence">
+                        Cümleyi Temizle
+                        <span class="btn-icon">→</span>
+                    </button>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+
+</html>
