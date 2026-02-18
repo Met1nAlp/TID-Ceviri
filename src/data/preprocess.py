@@ -201,6 +201,8 @@ def process_dataset(csv_path, video_dir, output_dir, split_name):
     """
     Process all videos in a dataset split
     """
+    import sys
+    
     # Read CSV
     df = pd.read_csv(csv_path, header=None, names=['video', 'label'])
     
@@ -215,22 +217,27 @@ def process_dataset(csv_path, video_dir, output_dir, split_name):
     successful = 0
     failed = 0
     empty_landmarks = 0
+    skipped = 0
     
     print(f"\nProcessing {split_name} split ({len(df)} videos)...")
+    sys.stdout.flush()
     
-    for idx, row in tqdm(df.iterrows(), total=len(df), desc=split_name):
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc=split_name, 
+                         file=sys.stdout, ncols=100, mininterval=1.0):
         video_name = row['video']
         label = row['label']
         
         # Skip if already processed (for resume functionality)
         output_file = output_path / f"{video_name.replace('.mp4', '')}.npy"
         if output_file.exists():
-            successful += 1
+            skipped += 1
             continue
         
         video_path = Path(video_dir) / split_name / video_name
         
         if not video_path.exists():
+            print(f"\nVideo not found: {video_name}")
+            sys.stdout.flush()
             failed += 1
             continue
         
@@ -241,22 +248,25 @@ def process_dataset(csv_path, video_dir, output_dir, split_name):
                 # Check if landmarks have meaningful data
                 if np.mean(np.abs(landmarks)) > 0.01:
                     # Save landmarks
-                    output_file = output_path / f"{video_name.replace('.mp4', '')}.npy"
                     np.save(output_file, landmarks)
                     successful += 1
                 else:
                     empty_landmarks += 1
                     failed += 1
             else:
+                # Video couldn't be opened or processed
                 failed += 1
                 
         except Exception as e:
-            print(f"Error processing {video_name}: {e}")
+            # Print error but continue processing
+            print(f"\nError processing {video_name}: {str(e)[:100]}")
+            sys.stdout.flush()
             failed += 1
     
     extractor.close()
     
-    print(f"\n{split_name}: Successful: {successful}, Failed: {failed}, Empty landmarks: {empty_landmarks}")
+    print(f"\n{split_name}: Skipped: {skipped}, Successful: {successful}, Failed: {failed}, Empty: {empty_landmarks}")
+    sys.stdout.flush()
     
     # Save metadata - only for successful files
     # Re-read to get only successful ones

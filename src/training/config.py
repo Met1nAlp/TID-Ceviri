@@ -51,9 +51,9 @@ LANDMARK_FEATURES = 258  # Using x, y, z + visibility for pose
 # MODEL ARCHITECTURE (HYBRID)
 # ============================================
 # GRU for landmark sequences
-GRU_HIDDEN_SIZE = 512
-GRU_NUM_LAYERS = 3
-GRU_DROPOUT = 0.4
+GRU_HIDDEN_SIZE = 256
+GRU_NUM_LAYERS = 2
+GRU_DROPOUT = 0.3
 GRU_BIDIRECTIONAL = True
 
 # CNN feature extractor
@@ -67,11 +67,11 @@ FUSION_DROPOUT = 0.5
 # ============================================
 # TRAINING - HIGH ACCURACY CONFIG
 # ============================================
-BATCH_SIZE = 16  # RTX 3070 8GB VRAM
+BATCH_SIZE = 64  # Larger batch for stable gradients
 NUM_EPOCHS = 100
-LEARNING_RATE = 3e-3  # 10x higher for faster learning
-WEIGHT_DECAY = 1e-5   # Less regularization initially
-WARMUP_EPOCHS = 0     # No warmup
+LEARNING_RATE = 1e-3  # Higher LR for faster learning
+WEIGHT_DECAY = 1e-4   # Slight regularization
+WARMUP_EPOCHS = 5     # Longer warmup for stability
 MIN_LR = 1e-6
 
 # Mixed precision for faster training

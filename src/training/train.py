@@ -33,6 +33,7 @@ from src.training.config import (
 from src.data.dataset import get_dataloaders
 from src.models.hybrid_model import get_model
 from src.models.simple_model import get_simple_model
+from src.models.ultra_simple import get_ultra_simple_model
 
 
 class Trainer:
@@ -253,6 +254,12 @@ class Trainer:
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         self.best_val_acc = checkpoint['best_val_acc']
         self.history = checkpoint['history']
+        
+        # Override LR with current config value (for fine-tuning)
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = LEARNING_RATE
+        print(f"Overriding LR to {LEARNING_RATE} from config")
+        
         return checkpoint['epoch']
     
     def train(self, num_epochs: int = NUM_EPOCHS, resume_from: str = None):
@@ -338,7 +345,7 @@ class Trainer:
 def main():
     parser = argparse.ArgumentParser(description="Train TID Recognition Model")
     parser.add_argument("--model", type=str, default="landmark_only",
-                       choices=["landmark_only", "hybrid", "simple"],
+                       choices=["landmark_only", "hybrid", "simple", "mlp", "lstm"],
                        help="Model type to train")
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS,
                        help="Number of training epochs")
@@ -360,7 +367,7 @@ def main():
     print("=" * 60 + "\n")
     
     # Get dataloaders
-    mode = "landmarks" if args.model in ["landmark_only", "simple"] else "hybrid"
+    mode = "landmarks" if args.model in ["landmark_only", "simple", "mlp", "lstm"] else "hybrid"
     train_loader, val_loader, _ = get_dataloaders(
         mode=mode,
         batch_size=args.batch_size
@@ -369,6 +376,10 @@ def main():
     # Get model
     if args.model == "simple":
         model = get_simple_model()
+    elif args.model == "mlp":
+        model = get_ultra_simple_model("mlp")
+    elif args.model == "lstm":
+        model = get_ultra_simple_model("lstm")
     else:
         model = get_model(args.model)
     

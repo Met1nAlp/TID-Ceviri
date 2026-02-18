@@ -69,6 +69,12 @@ class TIDLandmarkDataset(Dataset):
         landmarks_path = self.landmarks_dir / f"{video_name}.npy"
         landmarks = np.load(landmarks_path).astype(np.float32)
         
+        # Normalize landmarks (critical for training!)
+        # Per-sample normalization to handle varying ranges
+        mean = landmarks.mean()
+        std = landmarks.std() + 1e-8  # Avoid division by zero
+        landmarks = (landmarks - mean) / std
+        
         # Apply augmentation
         if self.augment:
             landmarks = self._augment(landmarks)
