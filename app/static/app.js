@@ -52,6 +52,11 @@ class TIDApp {
         document.getElementById('clearSentence').addEventListener('click', () => {
             this.clearSentence();
         });
+
+        // Speak sentence button
+        document.getElementById('speakSentence').addEventListener('click', () => {
+            this.speakSentence();
+        });
     }
     
     startPolling() {
@@ -161,6 +166,29 @@ class TIDApp {
             this.updateSentenceUI();
         } catch (error) {
             console.error('Error loading sentence:', error);
+        }
+    }
+
+    speakSentence() {
+        if (!this.sentence || this.sentence.length === 0) return;
+        
+        // Cümleyi birleştir (kelimeler arası boşluk bırak)
+        const textToSpeak = this.sentence.map(w => w.toUpperCase()).join(' ');
+        
+        // Web Speech API kullan (Tarayıcı destekliyorsa)
+        if ('speechSynthesis' in window) {
+            // Önceki konuşmaları iptal et
+            window.speechSynthesis.cancel();
+            
+            const utterance = new SpeechSynthesisUtterance(textToSpeak);
+            utterance.lang = 'tr-TR';
+            utterance.rate = 1.0;
+            utterance.pitch = 1.0;
+            
+            window.speechSynthesis.speak(utterance);
+        } else {
+            console.warn('Tarayıcınız Text-to-Speech (Sese Dönüştürme) özelliğini desteklemiyor.');
+            alert('Tarayıcınız seslendirme özelliğini desteklemiyor.');
         }
     }
     

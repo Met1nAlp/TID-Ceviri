@@ -25,7 +25,8 @@ app = Flask(__name__,
 CORS(app)
 
 # Global variables
-predictor = None
+predictor = None          # Web predictor
+mobile_predictor = None   # Mobil predictor (ayrı state)
 camera = None
 camera_lock = Lock()
 current_predictions = []
@@ -115,10 +116,104 @@ def remove_word():
     return jsonify({'sentence': current_sentence})
 
 
-def init_predictor():
-    global predictor
+@app.route('/predict_frame', methods=['POST'])
+def predict_frame():
+    """Mobile: tek frame gönder, motion state machine ile çalışır"""
+    global mobile_predictor
+    if mobile_predictor is None:
+        return jsonify({'error': 'Predictor not initialized'}), 503
+    if 'frame' not in request.files:
+        return jsonify({'error': 'No frame provided'}), 400
     try:
+        import numpy as np
+        file = request.files['frame']
+        npimg = np.frombuffer(file.read(), np.uint8)
+        frame = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+        if frame is None:
+            return jsonify({'error': 'Invalid image'}), 400
+        frame = cv2.flip(frame, 1)
+        predictions, _, sign_state = mobile_predictor.process_frame(frame)
+        return jsonify({
+            'predictions': [{'label_tr': p['label_tr'], 'label_en': p['label_en'], 'confidence': p['confidence']} for p in predictions],
+            'sign_state': sign_state
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/predict_sign', methods=['POST'])
+def predict_sign():
+    """
+    Mobil batch endpoint: birden fazla JPEG frame alır, 
+    Python MediaPipe ile landmark çıkarır, tahmin yapar.
+    Motion detection MOBILE tarafında yapılır.
+    """
+    global mobile_predictor
+    if mobile_predictor is None:
+        return jsonify({'error': 'Predictor not initialized'}), 503
+
+    try:
+        import numpy as np
+
+        # Multipart'tan tüm frame'leri al
+        frames = []
+        for key in sorted(request.files.keys()):
+            file = request.files[key]
+            npimg = np.frombuffer(file.read(), np.uint8)
+            frame = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
+            if frame is not None:
+                frame = cv2.flip(frame, 1)
+                frames.append(frame)
+
+        if len(frames) < 5:
+            return jsonify({'error': f'Too few frames: {len(frames)}', 'predictions': [], 'sign_state': 'idle'})
+
+        # Her frame'den landmark çıkar (Python MediaPipe — eğitimle aynı)
+        landmark_sequence = []
+        for f in frames:
+            landmarks, _ = mobile_predictor.extract_landmarks(f)
+            landmark_sequence.append(landmarks)
+
+        # SEQUENCE_LENGTH'e pad/trim
+        from src.training.config import SEQUENCE_LENGTH
+        if len(landmark_sequence) < SEQUENCE_LENGTH:
+            while len(landmark_sequence) < SEQUENCE_LENGTH:
+                landmark_sequence.append(landmark_sequence[-1])
+        else:
+            indices = np.linspace(0, len(landmark_sequence) - 1, SEQUENCE_LENGTH, dtype=int)
+            landmark_sequence = [landmark_sequence[i] for i in indices]
+
+        sequence = np.array(landmark_sequence, dtype=np.float32)
+        predictions = mobile_predictor.predict(sequence)
+
+        return jsonify({
+            'predictions': [
+                {'label_tr': p['label_tr'], 'label_en': p['label_en'], 'confidence': p['confidence']}
+                for p in predictions
+            ],
+            'sign_state': 'idle'
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'predictions': [], 'sign_state': 'idle'}), 500
+
+
+@app.route('/ping')
+def ping():
+    """Bağlantı kontrolü"""
+    return jsonify({'status': 'ok'})
+
+
+def init_predictor():
+    global predictor, mobile_predictor
+    try:
+        print("Web predictor yükleniyor...")
         predictor = PyTorchPredictor()
+        print("Mobil predictor yükleniyor...")
+        mobile_predictor = PyTorchPredictor()
+        print("✓ Her iki predictor hazır")
     except Exception as e:
         print(f"Error initializing predictor: {e}")
         import traceback
@@ -130,11 +225,17 @@ if __name__ == '__main__':
     print("\n" + "=" * 50)
     print("TID Recognition Web Server (PyTorch MLP Model)")
     print("GPU-Accelerated Inference")
+    print("Web + Mobil desteği")
     print("=" * 50)
     
     init_predictor()
     
-    print("\n✓ Server running at http://localhost:5000")
+    import socket
+    hostname = socket.gethostname()
+    local_ip = socket.gethostbyname(hostname)
+    
+    print(f"\n✓ Server running at http://localhost:5000")
+    print(f"✓ Mobil bağlantı: http://{local_ip}:5000")
     print("=" * 50 + "\n")
     
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

@@ -281,19 +281,25 @@ class PyTorchPredictor:
         return predictions, results, self.state
     
     def _predict_sign(self):
-        """Predict sign from collected frames"""
-        frames = self.sign_frames
-        
-        # Pad or trim to SEQUENCE_LENGTH
-        if len(frames) < SEQUENCE_LENGTH:
-            # Pad by repeating last frame
-            while len(frames) < SEQUENCE_LENGTH:
-                frames.append(frames[-1])
-        else:
-            # Take evenly spaced frames
-            indices = np.linspace(0, len(frames)-1, SEQUENCE_LENGTH, dtype=int)
-            frames = [frames[i] for i in indices]
-        
+        """Predict sign from collected frames — preprocess.py ile birebir aynı mantık"""
+        n = len(self.sign_frames)
+        if n == 0:
+            return []
+
+        # Lineer interpolasyon — preprocess.py _normalize_sequence_length ile aynı
+        # NOT: list(self.sign_frames) ile referans değil gerçek kopya alıyoruz
+        indices = np.linspace(0, n - 1, SEQUENCE_LENGTH)
+        frames = []
+        for idx in indices:
+            lower = int(np.floor(idx))
+            upper = min(int(np.ceil(idx)), n - 1)
+            weight = idx - lower
+            if lower == upper:
+                frames.append(self.sign_frames[lower].copy())
+            else:
+                interp = (1 - weight) * self.sign_frames[lower] + weight * self.sign_frames[upper]
+                frames.append(interp.astype(np.float32))
+
         sequence = np.array(frames, dtype=np.float32)
         return self.predict(sequence)
     

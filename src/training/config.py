@@ -91,9 +91,11 @@ EARLY_STOPPING_MIN_DELTA = 0.001
 AUGMENTATION = {
     "time_stretch": {"min_rate": 0.8, "max_rate": 1.2},
     "time_mask": {"max_frames": 5},
-    "landmark_noise": {"std": 0.01},
-    "landmark_dropout": {"rate": 0.05},
-    "horizontal_flip": False,  # Not applicable for sign language
+    "landmark_noise": {"std": 0.05},          # 5x artirildi - Android MediaPipe farklarina karsi
+    "landmark_dropout": {"rate": 0.15},        # 3x artirildi
+    "horizontal_flip": False,
+    "coord_scale": {"min": 0.90, "max": 1.10},  # Koordinat olcekleme (±10%)
+    "coord_shift": {"max": 0.03},               # Koordinat kaydirma (±3%)
 }
 
 # ============================================

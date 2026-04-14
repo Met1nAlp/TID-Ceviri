@@ -86,25 +86,37 @@ class TIDLandmarkDataset(Dataset):
         return landmarks, label
     
     def _augment(self, landmarks: np.ndarray) -> np.ndarray:
-        """Apply data augmentation to landmarks"""
+        """Apply data augmentation to landmarks - cross-platform robust"""
         
-        # Time stretching (simulate different speeds)
+        # Time stretching
         if np.random.random() < 0.3:
             landmarks = self._time_stretch(landmarks)
         
-        # Add Gaussian noise to landmarks
-        if np.random.random() < 0.5:
+        # Gaussian noise (agresif — Android MediaPipe farklarini simule eder)
+        if np.random.random() < 0.7:
             noise_std = AUGMENTATION["landmark_noise"]["std"]
             noise = np.random.normal(0, noise_std, landmarks.shape)
             landmarks = landmarks + noise.astype(np.float32)
         
-        # Random landmark dropout
+        # Koordinat olcekleme (SDK farklarina karsi)
+        if np.random.random() < 0.5:
+            scale_cfg = AUGMENTATION.get("coord_scale", {"min": 0.95, "max": 1.05})
+            scale = np.random.uniform(scale_cfg["min"], scale_cfg["max"])
+            landmarks = landmarks * scale
+        
+        # Koordinat kaydirma (SDK farklarina karsi)
+        if np.random.random() < 0.5:
+            shift_max = AUGMENTATION.get("coord_shift", {"max": 0.02})["max"]
+            shift = np.random.uniform(-shift_max, shift_max, (1, landmarks.shape[1]))
+            landmarks = landmarks + shift.astype(np.float32)
+        
+        # Landmark dropout
         if np.random.random() < 0.3:
             dropout_rate = AUGMENTATION["landmark_dropout"]["rate"]
             mask = np.random.random(landmarks.shape) > dropout_rate
             landmarks = landmarks * mask.astype(np.float32)
         
-        # Time masking (mask consecutive frames)
+        # Time masking
         if np.random.random() < 0.3:
             landmarks = self._time_mask(landmarks)
         
