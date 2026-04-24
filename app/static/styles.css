@@ -9,6 +9,7 @@
     --accent-green: #2ecc71;
     --accent-blue: #3498db;
     --accent-purple: #9b59b6;
+    --accent-amber: #f39c12;
     --accent-red: #e74c3c;
     --border-color: #3d4250;
     --shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
@@ -198,6 +199,58 @@ body {
     gap: 15px;
 }
 
+.debug-panel {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 16px;
+}
+
+.debug-panel h3 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--accent-amber);
+    margin-bottom: 12px;
+    text-align: center;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.debug-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.debug-item {
+    background: var(--bg-tertiary);
+    border-radius: 10px;
+    padding: 10px 12px;
+    min-height: 62px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 6px;
+}
+
+.debug-item-wide {
+    grid-column: 1 / -1;
+}
+
+.debug-label {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.debug-value {
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    font-weight: 600;
+    word-break: break-word;
+}
+
 .prediction-item {
     background: var(--bg-tertiary);
     border-radius: 12px;
@@ -350,5 +403,9 @@ body {
     
     .btn {
         flex: 1;
+    }
+
+    .debug-grid {
+        grid-template-columns: 1fr;
     }
 }

@@ -19,8 +19,8 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from src.training.config import (
     DEVICE, SEQUENCE_LENGTH, LANDMARK_FEATURES, NUM_CLASSES,
-    CONFIDENCE_THRESHOLD, TOP_K_PREDICTIONS,
-    DATA_DIR, MODEL_DIR
+    CONFIDENCE_THRESHOLD, TOP_K_PREDICTIONS, DATA_DIR, MODEL_DIR,
+    MOTION_THRESHOLD, IDLE_THRESHOLD, MIN_SIGN_FRAMES, IDLE_FRAMES_TO_STOP, START_FRAMES
 )
 from src.models.ultra_simple import SimpleLSTM
 
@@ -40,7 +40,12 @@ class RealTimePredictor:
         self,
         model_path: str = None,
         device: str = DEVICE,
-        confidence_threshold: float = CONFIDENCE_THRESHOLD
+        confidence_threshold: float = CONFIDENCE_THRESHOLD,
+        motion_threshold: float = MOTION_THRESHOLD,
+        idle_threshold: float = IDLE_THRESHOLD,
+        min_sign_frames: int = MIN_SIGN_FRAMES,
+        idle_frames_to_stop: int = IDLE_FRAMES_TO_STOP,
+        start_frames: int = START_FRAMES,
     ):
         self.device = device
         self.confidence_threshold = confidence_threshold
@@ -63,19 +68,27 @@ class RealTimePredictor:
         self.signing_frames = 0
         self.prev_landmarks = None
 
-        # Thresholds (same as web app)
-        self.MOTION_THRESHOLD = 0.015
-        self.IDLE_THRESHOLD = 0.005
-        self.MIN_SIGN_FRAMES = 15
-        self.MAX_SIGN_FRAMES = SEQUENCE_LENGTH
-        self.IDLE_FRAMES_TO_STOP = 8
-        self.START_FRAMES = 3
+        # Thresholds — config.py'den geliyor, tum platformlarda ayni
+        self.MOTION_THRESHOLD    = motion_threshold
+        self.IDLE_THRESHOLD      = idle_threshold
+        self.MIN_SIGN_FRAMES     = min_sign_frames
+        self.MAX_SIGN_FRAMES     = SEQUENCE_LENGTH
+        self.IDLE_FRAMES_TO_STOP = idle_frames_to_stop
+        self.START_FRAMES        = start_frames
 
         # Last predictions for display
         self.last_predictions = []
-
-        # Drawing
-        self.mp_drawing = mp.solutions.drawing_utils
+        self.TEMPERATURE = 1.5
+        self.MARGIN_THRESHOLD = 0.15
+        self.MIN_HAND_FRAMES_DIVISOR = 8
+        self.POSE_START_THRESHOLD = 0.0045
+        self.PRE_BUFFER_SIZE = 8
+        self.pre_buffer = deque(maxlen=self.PRE_BUFFER_SIZE)
+        self.VOTE_HISTORY_SIZE = 3
+        self.prediction_history = []
+        self.COOLDOWN_FRAMES = 20
+        self.cooldown_counter = 0
+        self.timestamp_ms = 0
 
     def _load_model(self, model_path: str) -> torch.nn.Module:
         """Load trained SimpleLSTM model"""
@@ -114,7 +127,7 @@ class RealTimePredictor:
                 urllib.request.urlretrieve(url, filepath)
 
     def _init_mediapipe(self):
-        """Initialize separate PoseLandmarker + HandLandmarker in VIDEO mode"""
+        """Initialize separate PoseLandmarker + HandLandmarker in VIDEO mode."""
         pose_options = vision.PoseLandmarkerOptions(
             base_options=python.BaseOptions(
                 model_asset_path=str(self.mp_model_dir / "pose_landmarker_heavy.task")
@@ -122,7 +135,8 @@ class RealTimePredictor:
             running_mode=vision.RunningMode.VIDEO,
             num_poses=1,
             min_pose_detection_confidence=0.3,
-            min_pose_presence_confidence=0.3
+            min_pose_presence_confidence=0.3,
+            min_tracking_confidence=0.3
         )
         self.pose_landmarker = vision.PoseLandmarker.create_from_options(pose_options)
 
@@ -133,12 +147,12 @@ class RealTimePredictor:
             running_mode=vision.RunningMode.VIDEO,
             num_hands=2,
             min_hand_detection_confidence=0.3,
-            min_hand_presence_confidence=0.3
+            min_hand_presence_confidence=0.3,
+            min_tracking_confidence=0.3
         )
         self.hand_landmarker = vision.HandLandmarker.create_from_options(hand_options)
 
-        self.timestamp_ms = 0
-        print("✓ MediaPipe Tasks API initialized")
+        print("MediaPipe Tasks API initialized (IMAGE mode — matches training pipeline)")
 
     def _load_class_labels(self) -> Dict[int, Tuple[str, str]]:
         """Load class ID to label mapping"""
@@ -161,11 +175,11 @@ class RealTimePredictor:
         return {i: (f"Class_{i}", f"Class_{i}") for i in range(NUM_CLASSES)}
 
     def extract_landmarks(self, frame) -> Tuple[np.ndarray, tuple]:
-        """Extract landmarks using MediaPipe Tasks API - returns 258 features"""
+        """Extract landmarks using MediaPipe Tasks API - returns 258 features."""
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
-        self.timestamp_ms += 33  # ~30 FPS
+        self.timestamp_ms += 33
         pose_result = self.pose_landmarker.detect_for_video(mp_image, self.timestamp_ms)
         hand_result = self.hand_landmarker.detect_for_video(mp_image, self.timestamp_ms)
 
@@ -212,7 +226,7 @@ class RealTimePredictor:
         return np.array(landmarks, dtype=np.float32), (pose_result, hand_result)
 
     def _compute_motion(self, landmarks: np.ndarray) -> float:
-        """Compute motion magnitude from hand landmarks (same as web)"""
+        """Compute motion magnitude from hand landmarks."""
         if self.prev_landmarks is None:
             self.prev_landmarks = landmarks.copy()
             return 0.0
@@ -220,13 +234,33 @@ class RealTimePredictor:
         # Focus on hand landmarks (132-258)
         curr_hands = landmarks[132:]
         prev_hands = self.prev_landmarks[132:]
-
-        motion = np.mean(np.abs(curr_hands - prev_hands))
+        
+        # Sol el (0-62) ve sağ el (63-125) ayrı ayrı kontrol et
+        left_motion = np.mean(np.abs(curr_hands[:63] - prev_hands[:63]))
+        right_motion = np.mean(np.abs(curr_hands[63:] - prev_hands[63:]))
+        
+        # En yüksek hareketi al (tek el yeterli)
         self.prev_landmarks = landmarks.copy()
-        return motion
+        return max(left_motion, right_motion)
+
+    def _build_prediction(self, class_id: int, prob: float,
+                          ambiguous: bool = False,
+                          low_confidence: bool = False) -> Dict:
+        tr_label, en_label = self.class_labels.get(int(class_id), (f"Class_{class_id}", f"Class_{class_id}"))
+        return {
+            'label_tr': tr_label,
+            'label_en': en_label,
+            'confidence': round(float(prob) * 100, 1),
+            'ambiguous': ambiguous,
+            'low_confidence': low_confidence,
+            'class_id': int(class_id),
+        }
+
+    def _has_hand_landmarks(self, frame: np.ndarray) -> bool:
+        return np.abs(frame[132:]).sum() > 0.1
 
     @torch.no_grad()
-    def predict(self, sequence: np.ndarray) -> List[Dict]:
+    def predict(self, sequence: np.ndarray, return_probs: bool = False):
         """Make prediction (same normalization as web + training)"""
         # Per-sample normalization (matches dataset.py and pytorch_predictor.py)
         mean = sequence.mean()
@@ -235,37 +269,94 @@ class RealTimePredictor:
 
         x = torch.from_numpy(sequence).unsqueeze(0).to(self.device)
         logits = self.model(x)
-        probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
+        scaled_logits = logits / self.TEMPERATURE
+        probs = torch.softmax(scaled_logits, dim=1)[0].cpu().numpy()
 
         top_indices = np.argsort(probs)[-TOP_K_PREDICTIONS:][::-1]
+        predictions = [self._build_prediction(int(idx), float(probs[idx])) for idx in top_indices]
 
-        predictions = []
-        for idx in top_indices:
-            prob = probs[idx]
-            tr_label, en_label = self.class_labels.get(int(idx), (f"Class_{idx}", f"Class_{idx}"))
-            predictions.append({
-                'label_tr': tr_label,
-                'label_en': en_label,
-                'confidence': round(float(prob) * 100, 1)
-            })
+        if len(predictions) >= 2:
+            margin = (predictions[0]['confidence'] - predictions[1]['confidence']) / 100.0
+            if margin < self.MARGIN_THRESHOLD:
+                for prediction in predictions:
+                    prediction['ambiguous'] = True
+
+        if return_probs:
+            return predictions, probs
 
         return predictions
 
     def _predict_sign(self) -> List[Dict]:
-        """Predict sign from collected frames (same logic as web)"""
-        frames = self.sign_frames
+        """Predict sign from collected frames.
+        Lineer interpolasyon kullanir — egitim pipeline (preprocess.py) ile
+        ve web (pytorch_predictor.py) ile birebir ayni.
+        """
+        n = len(self.sign_frames)
+        if n == 0:
+            return []
 
-        if len(frames) < SEQUENCE_LENGTH:
-            # Pad by repeating last frame
-            while len(frames) < SEQUENCE_LENGTH:
-                frames.append(frames[-1])
-        else:
-            # Take evenly spaced frames
-            indices = np.linspace(0, len(frames) - 1, SEQUENCE_LENGTH, dtype=int)
-            frames = [frames[i] for i in indices]
+        # Kalite kontrolu: gercek (sifir olmayan) frame sayisi
+        nonzero = sum(1 for f in self.sign_frames if np.any(f != 0))
+        if nonzero < 3:
+            return []  # cok az gercel veri
+        hand_frames = sum(1 for frame in self.sign_frames if self._has_hand_landmarks(frame))
+        min_required_hand_frames = max(3, n // self.MIN_HAND_FRAMES_DIVISOR)
+        if hand_frames < min_required_hand_frames:
+            self.prediction_history.clear()
+            return []
+
+        # Lineer interpolasyon — preprocess.py ile ayni
+        indices = np.linspace(0, n - 1, SEQUENCE_LENGTH)
+        frames = []
+        for idx in indices:
+            lower  = int(np.floor(idx))
+            upper  = min(int(np.ceil(idx)), n - 1)
+            weight = idx - lower
+            if lower == upper:
+                frames.append(self.sign_frames[lower].copy())
+            else:
+                interp = ((1 - weight) * self.sign_frames[lower]
+                          + weight * self.sign_frames[upper])
+                frames.append(interp.astype(np.float32))
 
         sequence = np.array(frames, dtype=np.float32)
-        return self.predict(sequence)
+        predictions, probs = self.predict(sequence, return_probs=True)
+        predictions = [p for p in predictions if p['confidence'] >= self.confidence_threshold * 100]
+        if not predictions:
+            return []
+
+        top_class_id = predictions[0]['class_id']
+        self.prediction_history.append(top_class_id)
+        if len(self.prediction_history) > self.VOTE_HISTORY_SIZE:
+            self.prediction_history.pop(0)
+
+        voted_class_id = top_class_id
+        if len(self.prediction_history) >= 2:
+            counts = {}
+            for class_id in self.prediction_history:
+                counts[class_id] = counts.get(class_id, 0) + 1
+            candidate = max(counts.items(), key=lambda item: item[1])[0]
+            if candidate != top_class_id and counts[candidate] >= 2:
+                voted_class_id = candidate
+
+        ambiguous = any(p.get('ambiguous', False) for p in predictions)
+        ordered_class_ids = [voted_class_id]
+        for idx in np.argsort(probs)[::-1]:
+            idx = int(idx)
+            if idx != voted_class_id and float(probs[idx]) * 100 >= self.confidence_threshold * 100:
+                ordered_class_ids.append(idx)
+            if len(ordered_class_ids) == TOP_K_PREDICTIONS:
+                break
+
+        return [
+            self._build_prediction(
+                idx,
+                float(probs[idx]),
+                ambiguous=ambiguous,
+                low_confidence=float(probs[idx]) < self.confidence_threshold,
+            )
+            for idx in ordered_class_ids
+        ]
 
     def process_frame(self, frame) -> Tuple[List[Dict], tuple, str]:
         """
@@ -273,6 +364,13 @@ class RealTimePredictor:
         Returns predictions only when a complete sign is detected.
         """
         landmarks, results = self.extract_landmarks(frame)
+        self.pre_buffer.append(landmarks.copy())
+
+        if self.cooldown_counter > 0:
+            self.cooldown_counter -= 1
+            self.prev_landmarks = landmarks.copy()
+            return [], results, self.state
+
         motion = self._compute_motion(landmarks)
 
         predictions = []
@@ -282,7 +380,8 @@ class RealTimePredictor:
                 self.signing_frames += 1
                 if self.signing_frames >= self.START_FRAMES:
                     self.state = "signing"
-                    self.sign_frames = []
+                    self.sign_frames = [buffered.copy() for buffered in self.pre_buffer]
+                    self.prediction_history.clear()
                     self.idle_frames = 0
                     self.signing_frames = 0
             else:
@@ -297,15 +396,20 @@ class RealTimePredictor:
                     if len(self.sign_frames) >= self.MIN_SIGN_FRAMES:
                         predictions = self._predict_sign()
                         self.last_predictions = predictions
+                        if predictions:
+                            self.cooldown_counter = self.COOLDOWN_FRAMES
                     self.state = "idle"
                     self.sign_frames = []
                     self.idle_frames = 0
             else:
+                # Hareket devam ediyor, idle counter'ı sıfırla
                 self.idle_frames = 0
 
             if len(self.sign_frames) >= self.MAX_SIGN_FRAMES:
                 predictions = self._predict_sign()
                 self.last_predictions = predictions
+                if predictions:
+                    self.cooldown_counter = self.COOLDOWN_FRAMES
                 self.state = "idle"
                 self.sign_frames = []
                 self.idle_frames = 0
@@ -437,7 +541,12 @@ class RealTimePredictor:
 def main():
     """Run real-time prediction"""
     predictor = RealTimePredictor(
-        confidence_threshold=0.5
+        confidence_threshold=0.4,
+        motion_threshold=0.0065,
+        idle_threshold=0.0070,
+        min_sign_frames=12,
+        idle_frames_to_stop=8,
+        start_frames=1,
     )
 
     try:

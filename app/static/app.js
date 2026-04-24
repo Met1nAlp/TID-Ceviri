@@ -7,6 +7,7 @@ class TIDApp {
     constructor() {
         this.predictions = [];
         this.sentence = [];
+        this.debug = {};
         this.pollInterval = null;
         
         this.init();
@@ -63,6 +64,7 @@ class TIDApp {
         // Poll for predictions every 200ms
         this.pollInterval = setInterval(() => {
             this.fetchPredictions();
+            this.fetchDebugStatus();
         }, 200);
     }
     
@@ -77,6 +79,20 @@ class TIDApp {
             }
         } catch (error) {
             console.error('Error fetching predictions:', error);
+        }
+    }
+
+    async fetchDebugStatus() {
+        try {
+            const response = await fetch('/debug_status');
+            const debug = await response.json();
+
+            if (debug && Object.keys(debug).length > 0) {
+                this.debug = debug;
+                this.updateDebugUI();
+            }
+        } catch (error) {
+            console.error('Error fetching debug status:', error);
         }
     }
     
@@ -98,6 +114,46 @@ class TIDApp {
                 confEl.textContent = '0%';
             }
         }
+    }
+
+    updateDebugUI() {
+        const debug = this.debug || {};
+        const lastDecisionParts = [];
+
+        if (debug.last_label && debug.last_label !== '-') {
+            lastDecisionParts.push(debug.last_label.toUpperCase());
+        }
+        if (typeof debug.last_confidence === 'number' && debug.last_confidence > 0) {
+            lastDecisionParts.push(`%${debug.last_confidence.toFixed(1)}`);
+        }
+        if (debug.last_ambiguous) {
+            lastDecisionParts.push('ambiguous');
+        }
+        if (debug.last_low_confidence) {
+            lastDecisionParts.push('low_conf');
+        }
+
+        document.getElementById('debugState').textContent = debug.state || '-';
+        document.getElementById('debugMotion').textContent = this.formatNumber(debug.motion, 4);
+        document.getElementById('debugCollected').textContent = this.formatInteger(debug.collected_frames);
+        document.getElementById('debugStart').textContent = this.formatInteger(debug.signing_frames);
+        document.getElementById('debugIdle').textContent = this.formatInteger(debug.idle_frames);
+        document.getElementById('debugCooldown').textContent = this.formatInteger(debug.cooldown_counter);
+        document.getElementById('debugHandVisible').textContent = debug.hand_visible ? 'evet' : 'hayir';
+        document.getElementById('debugHandFrames').textContent =
+            `${this.formatInteger(debug.hand_frames)} / ${this.formatInteger(debug.min_hand_frames)}`;
+        document.getElementById('debugLastDecision').textContent =
+            lastDecisionParts.length > 0 ? lastDecisionParts.join(' | ') : '-';
+        document.getElementById('debugReason').textContent =
+            [debug.last_event, debug.last_reason].filter(Boolean).join(' | ') || '-';
+    }
+
+    formatNumber(value, decimals = 1) {
+        return typeof value === 'number' ? value.toFixed(decimals) : '-';
+    }
+
+    formatInteger(value) {
+        return Number.isFinite(value) ? String(value) : '0';
     }
     
     clearPredictions() {

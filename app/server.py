@@ -85,6 +85,14 @@ def get_predictions():
     return jsonify(current_predictions)
 
 
+@app.route('/debug_status')
+def get_debug_status():
+    global predictor
+    if predictor is None:
+        return jsonify({})
+    return jsonify(predictor.get_debug_status())
+
+
 @app.route('/add_word', methods=['POST'])
 def add_word():
     global current_sentence
@@ -111,8 +119,13 @@ def get_sentence():
 @app.route('/remove_word', methods=['POST'])
 def remove_word():
     global current_sentence
-    if current_sentence:
-        current_sentence.pop()
+    data = request.json
+    index = data.get('index', -1)
+    
+    # Tıklanan kelimeyi sil
+    if 0 <= index < len(current_sentence):
+        current_sentence.pop(index)
+    
     return jsonify({'sentence': current_sentence})
 
 
@@ -210,9 +223,18 @@ def init_predictor():
     global predictor, mobile_predictor
     try:
         print("Web predictor yükleniyor...")
-        predictor = PyTorchPredictor()
+        predictor = PyTorchPredictor(
+            enable_temporal_smoothing=True,
+            use_video_landmarkers=True,
+            swap_handedness=False,
+            motion_threshold=0.0065,
+            idle_threshold=0.0070,
+            min_sign_frames=12,
+            idle_frames_to_stop=8,
+            start_frames=1
+        )
         print("Mobil predictor yükleniyor...")
-        mobile_predictor = PyTorchPredictor()
+        mobile_predictor = PyTorchPredictor(enable_temporal_smoothing=False)
         print("✓ Her iki predictor hazır")
     except Exception as e:
         print(f"Error initializing predictor: {e}")
@@ -237,5 +259,10 @@ if __name__ == '__main__':
     print(f"\n✓ Server running at http://localhost:5000")
     print(f"✓ Mobil bağlantı: http://{local_ip}:5000")
     print("=" * 50 + "\n")
+    
+    # Flask log'larını kapat
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
     
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

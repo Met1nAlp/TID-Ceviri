@@ -103,8 +103,15 @@ AUGMENTATION = {
 # ============================================
 SLIDING_WINDOW_SIZE = 48  # Frames
 SLIDING_WINDOW_STRIDE = 24  # 50% overlap
-CONFIDENCE_THRESHOLD = 0.7
+CONFIDENCE_THRESHOLD = 0.4
 TOP_K_PREDICTIONS = 3
+
+# Motion detection thresholds — tum pipeline'larda ortak (web, desktop, mobile)
+MOTION_THRESHOLD    = 0.008   # el hareketi bu degerin uzerindeyse -> signing baslar
+IDLE_THRESHOLD      = 0.006   # bu degerin altina duserse -> idle sayilir
+MIN_SIGN_FRAMES     = 15      # gecerli isaret icin minimum frame sayisi
+IDLE_FRAMES_TO_STOP = 10      # signing'i bitirmek icin gereken ardisik idle frame
+START_FRAMES        = 2       # signing'i baslatmak icin gereken ardisik hareket frame
 
 # ============================================
 # DEVICE
