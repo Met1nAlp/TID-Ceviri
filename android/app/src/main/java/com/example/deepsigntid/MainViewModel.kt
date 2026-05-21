@@ -19,7 +19,8 @@ data class AppState(
     val sentence: List<String> = emptyList(),
     val signState: String = "idle",
     val landmarks: LandmarkOverlay = LandmarkOverlay(),
-    val debugInfo: String = ""
+    val debugInfo: String = "",
+    val selection: DigitSelectionState = DigitSelectionState()
 )
 
 class MainViewModel : ViewModel() {
@@ -43,6 +44,10 @@ class MainViewModel : ViewModel() {
 
     fun updateDebugInfo(info: String) {
         _state.value = _state.value.copy(debugInfo = info)
+    }
+
+    fun updateSelectionState(selection: DigitSelectionState) {
+        _state.value = _state.value.copy(selection = selection)
     }
 
     fun addWordToSentence(word: String) {

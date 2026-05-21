@@ -199,30 +199,38 @@ body {
     gap: 15px;
 }
 
-.debug-panel {
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid var(--border-color);
+.selection-panel {
+    background: rgba(46, 204, 113, 0.07);
+    border: 1px solid rgba(46, 204, 113, 0.35);
     border-radius: 12px;
     padding: 16px;
 }
 
-.debug-panel h3 {
+.selection-panel h3 {
     font-size: 0.95rem;
     font-weight: 600;
-    color: var(--accent-amber);
-    margin-bottom: 12px;
+    color: var(--accent-green);
+    margin-bottom: 10px;
     text-align: center;
     letter-spacing: 0.08em;
     text-transform: uppercase;
 }
 
-.debug-grid {
+.selection-status {
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    text-align: center;
+    margin-bottom: 12px;
+}
+
+.selection-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
 }
 
-.debug-item {
+.selection-item {
     background: var(--bg-tertiary);
     border-radius: 10px;
     padding: 10px 12px;
@@ -233,18 +241,18 @@ body {
     gap: 6px;
 }
 
-.debug-item-wide {
+.selection-item-wide {
     grid-column: 1 / -1;
 }
 
-.debug-label {
+.selection-label {
     color: var(--text-secondary);
     font-size: 0.78rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
 }
 
-.debug-value {
+.selection-value {
     color: var(--text-primary);
     font-size: 0.95rem;
     font-weight: 600;
@@ -363,6 +371,11 @@ body {
     animation: pulse 1s infinite;
 }
 
+.prediction-item.selection-target {
+    border-color: var(--accent-amber);
+    box-shadow: 0 0 0 1px rgba(243, 156, 18, 0.35);
+}
+
 /* Responsive */
 @media (max-width: 1024px) {
     .main-content {
@@ -405,7 +418,7 @@ body {
         flex: 1;
     }
 
-    .debug-grid {
+    .selection-grid {
         grid-template-columns: 1fr;
     }
 }

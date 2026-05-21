@@ -1,0 +1,26 @@
+{
+  "class_names": [
+    "digit_1",
+    "digit_2",
+    "digit_3",
+    "other_digit"
+  ],
+  "class_to_index": {
+    "digit_1": 0,
+    "digit_2": 1,
+    "digit_3": 2,
+    "other_digit": 3
+  },
+  "source_to_target": {
+    "1": "digit_1",
+    "2": "digit_2",
+    "3": "digit_3",
+    "0": "other_digit",
+    "4": "other_digit",
+    "5": "other_digit",
+    "6": "other_digit",
+    "7": "other_digit",
+    "8": "other_digit",
+    "9": "other_digit"
+  }
+}

@@ -4,7 +4,7 @@ Supports both landmarks-only and hybrid (landmarks + frames) modes
 """
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import numpy as np
 import pandas as pd
 import cv2
@@ -29,7 +29,8 @@ class TIDLandmarkDataset(Dataset):
         self, 
         split: str = "train",
         augment: bool = True,
-        landmarks_dir: Optional[Path] = None
+        landmarks_dir: Optional[Path] = None,
+        allowed_class_ids: Optional[set[int]] = None,
     ):
         """
         Args:
@@ -45,6 +46,8 @@ class TIDLandmarkDataset(Dataset):
         
         # Load metadata and filter to only existing files
         metadata = pd.read_csv(self.landmarks_dir / "metadata.csv")
+        if allowed_class_ids:
+            metadata = metadata[metadata["label"].isin(sorted(allowed_class_ids))]
         
         # Filter to only include files that exist
         valid_indices = []
@@ -184,7 +187,8 @@ class TIDHybridDataset(Dataset):
         augment: bool = True,
         landmarks_dir: Optional[Path] = None,
         videos_dir: Optional[Path] = None,
-        sample_frames: int = 16  # Subsample frames for CNN
+        sample_frames: int = 16,  # Subsample frames for CNN
+        allowed_class_ids: Optional[set[int]] = None,
     ):
         self.split = split
         self.augment = augment and split == "train"
@@ -196,6 +200,8 @@ class TIDHybridDataset(Dataset):
         
         # Load metadata and filter to only existing files
         metadata = pd.read_csv(self.landmarks_dir / "metadata.csv")
+        if allowed_class_ids:
+            metadata = metadata[metadata["label"].isin(sorted(allowed_class_ids))]
         
         # Filter to only include files that exist
         valid_indices = []
@@ -288,7 +294,11 @@ def get_dataloaders(
     mode: str = "landmarks",  # "landmarks" or "hybrid"
     batch_size: int = BATCH_SIZE,
     num_workers: int = NUM_WORKERS,
-    pin_memory: bool = PIN_MEMORY
+    pin_memory: bool = PIN_MEMORY,
+    train_allowed_class_ids: Optional[set[int]] = None,
+    val_allowed_class_ids: Optional[set[int]] = None,
+    test_allowed_class_ids: Optional[set[int]] = None,
+    train_sample_weight_map: Optional[dict[int, float]] = None,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Get train, val, and test dataloaders
@@ -307,14 +317,41 @@ def get_dataloaders(
     else:
         DatasetClass = TIDHybridDataset
     
-    train_dataset = DatasetClass(split="train", augment=True)
-    val_dataset = DatasetClass(split="val", augment=False)
-    test_dataset = DatasetClass(split="test", augment=False)
-    
+    train_dataset = DatasetClass(
+        split="train",
+        augment=True,
+        allowed_class_ids=train_allowed_class_ids,
+    )
+    val_dataset = DatasetClass(
+        split="val",
+        augment=False,
+        allowed_class_ids=val_allowed_class_ids,
+    )
+    test_dataset = DatasetClass(
+        split="test",
+        augment=False,
+        allowed_class_ids=test_allowed_class_ids,
+    )
+
+    train_sampler = None
+    train_shuffle = True
+    if train_sample_weight_map:
+        sample_weights = [
+            float(train_sample_weight_map.get(int(label), 1.0))
+            for label in train_dataset.metadata["label"].tolist()
+        ]
+        train_sampler = WeightedRandomSampler(
+            weights=torch.tensor(sample_weights, dtype=torch.double),
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+        train_shuffle = False
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=train_shuffle,
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=True

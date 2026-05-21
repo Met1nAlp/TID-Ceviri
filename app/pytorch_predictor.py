@@ -80,7 +80,8 @@ class PyTorchPredictor:
         self.MOTION_THRESHOLD = MOTION_THRESHOLD if motion_threshold is None else motion_threshold
         self.IDLE_THRESHOLD = IDLE_THRESHOLD if idle_threshold is None else idle_threshold
         self.MIN_SIGN_FRAMES = MIN_SIGN_FRAMES if min_sign_frames is None else min_sign_frames
-        self.MAX_SIGN_FRAMES = SEQUENCE_LENGTH
+        self.MIN_DECISION_FRAMES = self.MIN_SIGN_FRAMES
+        self.MAX_SIGN_FRAMES = max(SEQUENCE_LENGTH + 24, 72)
         self.IDLE_FRAMES_TO_STOP = (
             IDLE_FRAMES_TO_STOP if idle_frames_to_stop is None else idle_frames_to_stop
         )
@@ -97,6 +98,7 @@ class PyTorchPredictor:
         self.VOTE_HISTORY_SIZE = 3
         self.prediction_history = []
         self.COOLDOWN_FRAMES = 20
+        self.TRAILING_IDLE_KEEP_FRAMES = 2
         self.cooldown_counter = 0
         self.last_debug = {
             "state": self.state,
@@ -115,6 +117,7 @@ class PyTorchPredictor:
             "last_ambiguous": False,
             "last_low_confidence": False,
         }
+        self.pose_motion_indices = (11, 12, 13, 14, 15, 16)
 
     def _download_models(self):
         self.model_dir = Path(__file__).parent.parent / "src" / "data" / "models"
@@ -183,7 +186,8 @@ class PyTorchPredictor:
                 mapping = json.load(f)
                 return {int(k): (v, v) for k, v in mapping.items()}
 
-        csv_path = Path("AUTSL/SignList_ClassId_TR_EN.csv")
+        corrected_csv_path = Path("AUTSL/SignList_ClassId_TR_EN_corrected.csv")
+        csv_path = corrected_csv_path if corrected_csv_path.exists() else Path("AUTSL/SignList_ClassId_TR_EN.csv")
         if csv_path.exists():
             import pandas as pd
 
@@ -260,6 +264,35 @@ class PyTorchPredictor:
     def get_debug_status(self):
         return dict(self.last_debug)
 
+    def reset_stream_state(self):
+        self.prev_landmarks = None
+        self.state = "idle"
+        self.sign_frames = []
+        self.idle_frames = 0
+        self.signing_frames = 0
+        self.pre_buffer.clear()
+        self.prediction_history.clear()
+        self.cooldown_counter = 0
+        self.last_debug.update(
+            {
+                "state": self.state,
+                "motion": 0.0,
+                "signing_frames": 0,
+                "idle_frames": 0,
+                "collected_frames": 0,
+                "cooldown_counter": 0,
+                "hand_visible": False,
+                "hand_frames": 0,
+                "min_hand_frames": 0,
+                "last_event": "reset",
+                "last_reason": "",
+                "last_label": "-",
+                "last_confidence": 0.0,
+                "last_ambiguous": False,
+                "last_low_confidence": False,
+            }
+        )
+
     def _record_last_event(
         self,
         event,
@@ -335,20 +368,40 @@ class PyTorchPredictor:
         return predictions
 
     def _compute_motion(self, landmarks):
-        if self.prev_landmarks is None:
-            self.prev_landmarks = landmarks.copy()
+        motion = self.preview_motion(landmarks)
+        self.prev_landmarks = landmarks.copy()
+        return motion
+
+    def preview_motion(self, landmarks, previous_landmarks=None):
+        reference_landmarks = self.prev_landmarks if previous_landmarks is None else previous_landmarks
+        if reference_landmarks is None:
             return 0.0
 
         curr_hands = landmarks[132:]
-        prev_hands = self.prev_landmarks[132:]
+        prev_hands = reference_landmarks[132:]
         left_motion = np.mean(np.abs(curr_hands[:63] - prev_hands[:63]))
         right_motion = np.mean(np.abs(curr_hands[63:] - prev_hands[63:]))
+        hand_motion = max(left_motion, right_motion)
 
-        self.prev_landmarks = landmarks.copy()
-        return max(left_motion, right_motion)
+        pose_diffs = []
+        for landmark_index in self.pose_motion_indices:
+            base = landmark_index * 4
+            pose_diffs.extend(
+                [
+                    abs(landmarks[base] - reference_landmarks[base]),
+                    abs(landmarks[base + 1] - reference_landmarks[base + 1]),
+                    abs(landmarks[base + 2] - reference_landmarks[base + 2]),
+                ]
+            )
+        pose_motion = float(np.mean(pose_diffs)) if pose_diffs else 0.0
+
+        return max(hand_motion, pose_motion * 0.6)
 
     def process_frame(self, frame):
         landmarks, results = self.extract_landmarks(frame)
+        return self.process_landmarks(landmarks, results)
+
+    def process_landmarks(self, landmarks, results=None):
         self.pre_buffer.append(landmarks.copy())
         motion = self._compute_motion(landmarks)
 
@@ -380,7 +433,7 @@ class PyTorchPredictor:
             if motion < self.IDLE_THRESHOLD:
                 self.idle_frames += 1
                 if self.idle_frames >= self.IDLE_FRAMES_TO_STOP:
-                    if len(self.sign_frames) >= self.MIN_SIGN_FRAMES:
+                    if len(self.sign_frames) >= self.MIN_DECISION_FRAMES:
                         predictions = self._predict_sign()
                         if self.enable_temporal_smoothing and predictions:
                             self.cooldown_counter = self.COOLDOWN_FRAMES
@@ -402,12 +455,17 @@ class PyTorchPredictor:
         return predictions, results, self.state
 
     def _predict_sign(self):
-        n = len(self.sign_frames)
+        effective_frames = self.sign_frames
+        trailing_idle_trim = max(0, self.idle_frames - self.TRAILING_IDLE_KEEP_FRAMES)
+        if trailing_idle_trim > 0 and len(self.sign_frames) - trailing_idle_trim >= 1:
+            effective_frames = self.sign_frames[:-trailing_idle_trim]
+
+        n = len(effective_frames)
         if n == 0:
             self._record_last_event("skipped", "empty_sequence")
             return []
 
-        valid_frames = sum(1 for frame in self.sign_frames if np.mean(np.abs(frame)) > 0.01)
+        valid_frames = sum(1 for frame in effective_frames if np.mean(np.abs(frame)) > 0.01)
         if valid_frames < n * 0.5:
             self._record_last_event("skipped", "too_many_empty_frames")
             return []
@@ -415,7 +473,7 @@ class PyTorchPredictor:
         hand_frames = 0
         min_required_hand_frames = 0
         if self.enable_temporal_smoothing:
-            hand_frames = sum(1 for frame in self.sign_frames if self._has_hand_landmarks(frame))
+            hand_frames = sum(1 for frame in effective_frames if self._has_hand_landmarks(frame))
             min_required_hand_frames = max(3, n // self.MIN_HAND_FRAMES_DIVISOR)
             if hand_frames < min_required_hand_frames:
                 self.prediction_history.clear()
@@ -434,9 +492,9 @@ class PyTorchPredictor:
             upper = min(int(np.ceil(idx)), n - 1)
             weight = idx - lower
             if lower == upper:
-                frames.append(self.sign_frames[lower].copy())
+                frames.append(effective_frames[lower].copy())
             else:
-                interp = (1 - weight) * self.sign_frames[lower] + weight * self.sign_frames[upper]
+                interp = (1 - weight) * effective_frames[lower] + weight * effective_frames[upper]
                 frames.append(interp.astype(np.float32))
 
         sequence = np.array(frames, dtype=np.float32)

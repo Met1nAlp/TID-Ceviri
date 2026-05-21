@@ -9,12 +9,13 @@ import org.pytorch.Tensor
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 data class Prediction(
     val labelTr: String,
     val labelEn: String,
     val confidence: Float,
-    val classId: Int
+    val classId: Int,
 )
 
 class SignPredictor(private val context: Context) {
@@ -22,39 +23,44 @@ class SignPredictor(private val context: Context) {
     private var module: Module? = null
     private var labelsTr: List<String> = emptyList()
     private var labelsEn: List<String> = emptyList()
+    private val digitSelectionPredictor = DigitSelectionPredictor(context)
 
-    private val SEQ_LENGTH = 48
-    private val FEATURE_SIZE = 258
+    private val seqLength = 48
+    private val featureSize = 258
+    private val maxRawSignFrames = 72
 
-    // Segmentasyon esikleri — config.py ile ayni (web ile tutarli)
-    private val MOTION_THRESHOLD    = 0.008f   // web: 0.008
-    private val IDLE_THRESHOLD      = 0.006f   // web: 0.006
-    private val MIN_SIGN_FRAMES     = 15       // web: 15
-    private val IDLE_FRAMES_TO_STOP = 10       // web: 10
-    private val START_FRAMES        = 2        // web: 2
-    private val MIN_CONFIDENCE      = 40f      // web CONFIDENCE_THRESHOLD=0.4 ile ayni
+    // Segmentation thresholds aligned with the desktop/web path.
+    private val motionThreshold = 0.008f
+    private val idleThreshold = 0.006f
+    private val minSignFrames = 15
+    private val minDecisionFrames = minSignFrames
+    private val idleFramesToStop = 7
+    private val startFrames = 2
+    private val minConfidence = 40f
 
-    // Temperature Scaling — web (pytorch_predictor.py) ile ayni
-    // T > 1 -> model daha az emin, belirsiz siniflar ayrilir
-    private val TEMPERATURE         = 1.5f
+    // Temperature scaling + margin filter aligned with the desktop path.
+    private val temperature = 1.5f
+    private val marginThreshold = 0.15f
+    private val minHandFramesDivisor = 8
 
-    // Margin filter — web ile ayni: top1-top2 < %15 ise 'belirsiz'
-    private val MARGIN_THRESHOLD    = 0.15f    // web: 0.15
-    private val MIN_HAND_FRAMES_DIVISOR = 8
+    // Pre-buffer helps keep the beginning of the sign.
+    private val preBufferSize = 8
+    private val preBuffer = ArrayDeque<FloatArray>(preBufferSize + 2)
 
-    // Pre-buffer: isaret baslamadan onceki frame'leri yakala
-    private val PRE_BUFFER_SIZE     = 8        // son 8 frame hafizada tut
-    private val preBuffer = ArrayDeque<FloatArray>(PRE_BUFFER_SIZE + 2)
+    // Voting over the last few predictions.
+    private val voteHistorySize = 3
+    private val predictionHistory = mutableListOf<Int>()
 
-    // Tahmin oylama: son tahminleri tut, en sik tekrarlanani goster
-    private val VOTE_HISTORY_SIZE   = 3
-    private val predictionHistory = mutableListOf<Int>()  // son N class id
+    // Cooldown avoids immediate double-triggering.
+    private val cooldownFrames = 20
+    private val selectionCooldownFrames = 12
+    private val selectionInterruptRequiredFrames = 4
+    private val selectionInterruptMotionThreshold = 0.0115f
+    private val trailingIdleKeepFrames = 2
+    private val poseMotionIndices = intArrayOf(11, 12, 13, 14, 15, 16)
+    private var cooldownCounter = 0
+    private var selectionInterruptFrames = 0
 
-    // Cooldown: tahmin sonrasi bekleme (cift tetiklemeyi onle)
-    private val COOLDOWN_FRAMES     = 20       // ~0.7s bekleme
-    private var cooldownCounter     = 0
-
-    // Durum makinesi
     private var state = "idle"
     private val signFrames = mutableListOf<FloatArray>()
     private var idleFrames = 0
@@ -65,6 +71,14 @@ class SignPredictor(private val context: Context) {
     var onPrediction: ((List<Prediction>) -> Unit)? = null
     var onStateChange: ((String) -> Unit)? = null
     var onDebug: ((String) -> Unit)? = null
+    var onSelectionStateChange: ((DigitSelectionState) -> Unit)? = null
+    var onSelectionConfirmed: ((Prediction) -> Unit)? = null
+
+    init {
+        loadModel()
+        loadLabels()
+        emitSelectionState()
+    }
 
     fun forcePredict() {
         if (signFrames.size >= 5) {
@@ -75,9 +89,158 @@ class SignPredictor(private val context: Context) {
         }
     }
 
-    init {
-        loadModel()
-        loadLabels()
+    fun cancelSelection(reason: String = "manual_selection") {
+        if (!digitSelectionPredictor.isActive()) {
+            return
+        }
+        digitSelectionPredictor.cancel(reason)
+        selectionInterruptFrames = 0
+        cooldownCounter = maxOf(cooldownCounter, selectionCooldownFrames)
+        preBuffer.clear()
+        emitSelectionState()
+    }
+
+    fun processLandmarks(landmarks: FloatArray) {
+        if (landmarks.size != featureSize) return
+        frameDebugCount++
+        val motion = computeMotion(landmarks)
+
+        if (digitSelectionPredictor.isActive()) {
+            val selectionOutcome = digitSelectionPredictor.processLandmarks(landmarks)
+            emitSelectionState()
+
+            when (selectionOutcome?.event) {
+                "selected" -> {
+                    selectionOutcome.prediction?.let { prediction ->
+                        onSelectionConfirmed?.invoke(prediction)
+                        onDebug?.invoke("Secildi: ${prediction.labelTr}")
+                    }
+                    selectionInterruptFrames = 0
+                    cooldownCounter = maxOf(cooldownCounter, selectionCooldownFrames)
+                    preBuffer.clear()
+                }
+                "timeout" -> {
+                    selectionInterruptFrames = 0
+                    onDebug?.invoke("Secim zamani doldu")
+                    cooldownCounter = maxOf(cooldownCounter, selectionCooldownFrames)
+                    preBuffer.clear()
+                }
+            }
+
+            if (selectionOutcome != null) {
+                prevLandmarks = landmarks.copyOf()
+                return
+            }
+
+            if (digitSelectionPredictor.isInterruptGuardActive()) {
+                selectionInterruptFrames = 0
+                prevLandmarks = landmarks.copyOf()
+                return
+            }
+
+            if (digitSelectionPredictor.hasDigitEvidence()) {
+                selectionInterruptFrames = 0
+                prevLandmarks = landmarks.copyOf()
+                return
+            }
+
+            if (motion > selectionInterruptMotionThreshold) {
+                selectionInterruptFrames++
+            } else {
+                selectionInterruptFrames = 0
+            }
+
+            if (selectionInterruptFrames < selectionInterruptRequiredFrames) {
+                prevLandmarks = landmarks.copyOf()
+                return
+            }
+
+            digitSelectionPredictor.cancel("new_sign_started")
+            selectionInterruptFrames = 0
+            emitSelectionState()
+            onDebug?.invoke("Secim iptal edildi, yeni isaret algilandi")
+        }
+
+        preBuffer.addLast(landmarks.copyOf())
+        if (preBuffer.size > preBufferSize) {
+            preBuffer.removeFirst()
+        }
+
+        if (cooldownCounter > 0) {
+            cooldownCounter--
+            prevLandmarks = landmarks.copyOf()
+            return
+        }
+
+        if (!hasHandLandmarks(landmarks) && frameDebugCount % 90 == 0) {
+            onDebug?.invoke("Eller net gorunmuyor")
+        }
+
+        if (frameDebugCount % 15 == 0) {
+            val msg = "motion=${"%.4f".format(motion)} state=$state frames=${signFrames.size} idle=$idleFrames"
+            Log.d("SignPredictor", msg)
+            onDebug?.invoke(msg)
+        }
+
+        when (state) {
+            "idle" -> {
+                if (motion > motionThreshold) {
+                    signingFrames++
+                    if (signingFrames >= startFrames) {
+                        state = "signing"
+                        signFrames.clear()
+                        predictionHistory.clear()
+                        for (bufferedFrame in preBuffer) {
+                            signFrames.add(bufferedFrame)
+                        }
+                        idleFrames = 0
+                        signingFrames = 0
+                        onStateChange?.invoke("signing")
+                        onDebug?.invoke("Isaret basladi! motion=${"%.4f".format(motion)} (+${preBuffer.size} pre-buffer)")
+                    }
+                } else {
+                    signingFrames = 0
+                }
+            }
+
+            "signing" -> {
+                signFrames.add(landmarks.copyOf())
+
+                if (motion < idleThreshold) {
+                    idleFrames++
+                    if (idleFrames >= idleFramesToStop) {
+                        if (signFrames.size >= minDecisionFrames) {
+                            onDebug?.invoke("Isaret bitti (${signFrames.size} frame), tahmin yapiliyor...")
+                            predictSign()
+                            cooldownCounter = cooldownFrames
+                        } else {
+                            onDebug?.invoke("Cok kisa isaret (${signFrames.size}/$minSignFrames), atlandi")
+                        }
+                        state = "idle"
+                        signFrames.clear()
+                        idleFrames = 0
+                        onStateChange?.invoke("idle")
+                    }
+                } else {
+                    if (idleFrames > 0) {
+                        onDebug?.invoke("Hareket devam ediyor (idle sifirlandi)")
+                    }
+                    idleFrames = 0
+                }
+
+                if (signFrames.size >= maxRawSignFrames) {
+                    onDebug?.invoke("Maks ham frame ($maxRawSignFrames), tahmin yapiliyor...")
+                    predictSign()
+                    cooldownCounter = cooldownFrames
+                    state = "idle"
+                    signFrames.clear()
+                    idleFrames = 0
+                    onStateChange?.invoke("idle")
+                }
+            }
+        }
+
+        prevLandmarks = landmarks.copyOf()
     }
 
     private fun loadModel() {
@@ -100,144 +263,71 @@ class SignPredictor(private val context: Context) {
         }
     }
 
-    fun processLandmarks(landmarks: FloatArray) {
-        if (landmarks.size != FEATURE_SIZE) return
-        frameDebugCount++
-
-        // Pre-buffer guncelle (her zaman son N frame'i tut)
-        preBuffer.addLast(landmarks.copyOf())
-        if (preBuffer.size > PRE_BUFFER_SIZE) {
-            preBuffer.removeFirst()
-        }
-
-        // Cooldown kontrolu
-        if (cooldownCounter > 0) {
-            cooldownCounter--
-            prevLandmarks = landmarks.copyOf()
-            return
-        }
-
-        // El algilama kontrolu
-        if (!hasHandLandmarks(landmarks)) {
-            if (frameDebugCount % 90 == 0) {
-                onDebug?.invoke("Eller net gorunmuyor")
-            }
-        }
-
-        val motion = computeMotion(landmarks)
-
-        if (frameDebugCount % 15 == 0) {
-            val msg = "motion=${"%.4f".format(motion)} state=$state frames=${signFrames.size} idle=$idleFrames"
-            Log.d("SignPredictor", msg)
-            onDebug?.invoke(msg)
-        }
-
-        when (state) {
-            "idle" -> {
-                if (motion > MOTION_THRESHOLD) {
-                    signingFrames++
-                    if (signingFrames >= START_FRAMES) {
-                        state = "signing"
-                        signFrames.clear()
-                        predictionHistory.clear()
-                        // Pre-buffer'daki frame'leri ekle (isaretin basini yakala)
-                        for (bufferedFrame in preBuffer) {
-                            signFrames.add(bufferedFrame)
-                        }
-                        idleFrames = 0
-                        signingFrames = 0
-                        onStateChange?.invoke("signing")
-                        onDebug?.invoke("Isaret basladi! motion=${"%.4f".format(motion)} (+${preBuffer.size} pre-buffer)")
-                    }
-                } else {
-                    signingFrames = 0
-                }
-            }
-
-            "signing" -> {
-                signFrames.add(landmarks.copyOf())
-
-                if (motion < IDLE_THRESHOLD) {
-                    idleFrames++
-                    if (idleFrames >= IDLE_FRAMES_TO_STOP) {
-                        if (signFrames.size >= MIN_SIGN_FRAMES) {
-                            onDebug?.invoke("Isaret bitti (${signFrames.size} frame), tahmin yapiliyor...")
-                            predictSign()
-                            cooldownCounter = COOLDOWN_FRAMES  // cooldown baslat
-                        } else {
-                            onDebug?.invoke("Cok kisa isaret (${signFrames.size}/${MIN_SIGN_FRAMES}), atlandi")
-                        }
-                        state = "idle"
-                        signFrames.clear()
-                        idleFrames = 0
-                        onStateChange?.invoke("idle")
-                    }
-                } else {
-                    if (idleFrames > 0) {
-                        onDebug?.invoke("Hareket devam ediyor (idle sifirlandi)")
-                    }
-                    idleFrames = 0
-                }
-
-                // Maks frame'e ulasinca zorla tahmin et
-                if (signFrames.size >= SEQ_LENGTH) {
-                    onDebug?.invoke("Maks frame ($SEQ_LENGTH), tahmin yapiliyor...")
-                    predictSign()
-                    cooldownCounter = COOLDOWN_FRAMES
-                    state = "idle"
-                    signFrames.clear()
-                    idleFrames = 0
-                    onStateChange?.invoke("idle")
-                }
-            }
-        }
-
-        prevLandmarks = landmarks.copyOf()
-    }
-
     private fun computeMotion(landmarks: FloatArray): Float {
         val prev = prevLandmarks ?: return 0f
-        
-        // Tek el bile hareket ediyorsa algıla
-        // Sol el (132-194) ve sağ el (195-257) ayrı ayrı kontrol et
+
         val handStart = 132
         val leftHandEnd = 195
         val rightHandEnd = minOf(258, landmarks.size)
-        
-        // Sol el hareketi
+
         var leftSum = 0f
         for (i in handStart until leftHandEnd) {
             leftSum += abs(landmarks[i] - prev[i])
         }
         val leftMotion = leftSum / (leftHandEnd - handStart)
-        
-        // Sağ el hareketi
+
         var rightSum = 0f
         for (i in leftHandEnd until rightHandEnd) {
             rightSum += abs(landmarks[i] - prev[i])
         }
         val rightMotion = rightSum / (rightHandEnd - leftHandEnd)
-        
-        // En yüksek hareketi al (tek el yeterli)
-        return maxOf(leftMotion, rightMotion)
+        val handMotion = maxOf(leftMotion, rightMotion)
+
+        var poseSum = 0f
+        var poseCount = 0
+        for (landmarkIndex in poseMotionIndices) {
+            val base = landmarkIndex * 4
+            poseSum += abs(landmarks[base] - prev[base])
+            poseSum += abs(landmarks[base + 1] - prev[base + 1])
+            poseSum += abs(landmarks[base + 2] - prev[base + 2])
+            poseCount += 3
+        }
+        val poseMotion = if (poseCount > 0) poseSum / poseCount else 0f
+
+        return maxOf(handMotion, poseMotion * 0.6f)
     }
 
-    /**
-     * Eğitim pipeline'ı (preprocess.py) ile birebir aynı:
-     *  - Her iki durum için (kısa / uzun) lineer interpolasyon ile SEQ_LENGTH'e çek
-     *  - Tek pencere yaklaşımı (ensemble kaldırıldı — sinyali bozuyordu)
-     */
     private fun predictSign() {
         val mod = module ?: run {
-            onDebug?.invoke("❌ Model yüklenmemiş!")
+            onDebug?.invoke("Model yuklenmemis")
             return
         }
         if (signFrames.isEmpty()) return
 
         try {
-            val n = signFrames.size
-            val handFrames = signFrames.count { hasHandLandmarks(it) }
-            val minRequiredHandFrames = maxOf(3, n / MIN_HAND_FRAMES_DIVISOR)
+            val trailingIdleTrim = maxOf(0, idleFrames - trailingIdleKeepFrames)
+            val effectiveFrames = if (trailingIdleTrim > 0 && signFrames.size - trailingIdleTrim >= 1) {
+                signFrames.dropLast(trailingIdleTrim)
+            } else {
+                signFrames.toList()
+            }
+
+            val n = effectiveFrames.size
+            val validFrames = effectiveFrames.count { frame ->
+                var magnitude = 0f
+                for (value in frame) {
+                    magnitude += abs(value)
+                }
+                (magnitude / frame.size) > 0.01f
+            }
+            if (validFrames < n * 0.5f) {
+                onDebug?.invoke("Cok fazla bos frame ($validFrames/$n), tahmin atlandi")
+                predictionHistory.clear()
+                return
+            }
+
+            val handFrames = effectiveFrames.count { hasHandLandmarks(it) }
+            val minRequiredHandFrames = maxOf(3, n / minHandFramesDivisor)
 
             if (handFrames < minRequiredHandFrames) {
                 onDebug?.invoke("El landmark zayif ($handFrames/$n frame), tahmin atlandi")
@@ -245,91 +335,77 @@ class SignPredictor(private val context: Context) {
                 return
             }
 
-            // Lineer interpolasyon — preprocess.py _normalize_sequence_length ile aynı
-            val inputData = FloatArray(SEQ_LENGTH * FEATURE_SIZE)
-            for (i in 0 until SEQ_LENGTH) {
-                val idx  = i.toFloat() * (n - 1) / (SEQ_LENGTH - 1)
+            val inputData = FloatArray(seqLength * featureSize)
+            for (i in 0 until seqLength) {
+                val idx = i.toFloat() * (n - 1) / (seqLength - 1)
                 val lower = idx.toInt().coerceIn(0, n - 1)
                 val upper = (lower + 1).coerceIn(0, n - 1)
                 val weight = idx - lower
 
-                for (f in 0 until FEATURE_SIZE) {
+                for (featureIndex in 0 until featureSize) {
                     val value = if (lower == upper) {
-                        signFrames[lower][f]
+                        effectiveFrames[lower][featureIndex]
                     } else {
-                        (1f - weight) * signFrames[lower][f] + weight * signFrames[upper][f]
+                        (1f - weight) * effectiveFrames[lower][featureIndex] +
+                            weight * effectiveFrames[upper][featureIndex]
                     }
-                    inputData[i * FEATURE_SIZE + f] = value
+                    inputData[i * featureSize + featureIndex] = value
                 }
             }
 
-            // Normalize: mean/std — dataset.py satır 74-76 ile aynı
             val mean = inputData.average().toFloat()
-            val std = run {
-                var sumSq = 0.0
-                for (v in inputData) sumSq += (v - mean).toDouble() * (v - mean)
-                (Math.sqrt(sumSq / inputData.size) + 1e-8).toFloat()
+            var sumSq = 0.0
+            for (value in inputData) {
+                val diff = (value - mean).toDouble()
+                sumSq += diff * diff
             }
-            for (i in inputData.indices) inputData[i] = (inputData[i] - mean) / std
+            val std = (sqrt(sumSq / inputData.size) + 1e-8).toFloat()
+            for (i in inputData.indices) {
+                inputData[i] = (inputData[i] - mean) / std
+            }
 
             val inputTensor = Tensor.fromBlob(
                 inputData,
-                longArrayOf(1, SEQ_LENGTH.toLong(), FEATURE_SIZE.toLong())
+                longArrayOf(1, seqLength.toLong(), featureSize.toLong()),
             )
 
             val output = mod.forward(IValue.from(inputTensor)).toTensor()
             val scores = output.dataAsFloatArray
+            val probs = temperatureSoftmax(scores, temperature)
 
-            // Temperature Scaling — logit'leri T'ye bol, sonra softmax uygula
-            // Web (pytorch_predictor.py) ile ayni yaklasim
-            val maxScore = scores.max()!!
-            val expScores = FloatArray(scores.size) {
-                Math.exp(((scores[it] - maxScore) / TEMPERATURE).toDouble()).toFloat()
-            }
-            val sumExp = expScores.sum()
-            val probs = FloatArray(scores.size) { expScores[it] / sumExp }
-
-            // Dusuk guven filtresi (web: CONFIDENCE_THRESHOLD=0.4)
-            val topConfidence = probs.max()!! * 100f
-            if (topConfidence < MIN_CONFIDENCE) {
-                onDebug?.invoke("Guven dusuk (${topConfidence.toInt()}%), atlandi")
-                return
-            }
-
-            // Margin filter — web ile ayni: top1 - top2 < %15 ise belirsiz say
+            val topConfidence = (probs.maxOrNull() ?: 0f) * 100f
             val sorted = probs.sortedDescending()
-            val margin = sorted[0] - sorted[1]
-            if (margin < MARGIN_THRESHOLD) {
-                onDebug?.invoke("Belirsiz tahmin (margin: ${(margin*100).toInt()}% < ${(MARGIN_THRESHOLD*100).toInt()}%), atlandi")
-                return
-            }
+            val margin = if (sorted.size >= 2) sorted[0] - sorted[1] else 1f
+            val lowConfidence = topConfidence < minConfidence
+            val ambiguous = margin < marginThreshold
 
             val topClassId = probs.indices.maxByOrNull { probs[it] } ?: 0
-
-            // Tahmin gecmisine ekle (voting icin)
             predictionHistory.add(topClassId)
-            if (predictionHistory.size > VOTE_HISTORY_SIZE) {
+            if (predictionHistory.size > voteHistorySize) {
                 predictionHistory.removeAt(0)
             }
 
-            // Voting: son 3 tahminde en sik tekrarlanan sinifi bul
             val votedClassId = if (predictionHistory.size >= 2) {
                 predictionHistory.groupBy { it }
-                    .maxByOrNull { it.value.size }?.key ?: topClassId
+                    .maxByOrNull { it.value.size }
+                    ?.key ?: topClassId
             } else {
                 topClassId
             }
 
-            // Eger voting sonucu farkli ve tekrar sayisi >= 2 ise voted'i kullan
-            val finalClassId = if (votedClassId != topClassId &&
-                predictionHistory.count { it == votedClassId } >= 2) {
-                onDebug?.invoke("Voting: ${labelsTr.getOrElse(topClassId){"?"}} -> ${labelsTr.getOrElse(votedClassId){"?"}} (${predictionHistory.count { it == votedClassId }}/${predictionHistory.size} oy)")
+            val finalClassId = if (
+                votedClassId != topClassId &&
+                predictionHistory.count { it == votedClassId } >= 2
+            ) {
+                onDebug?.invoke(
+                    "Voting: ${labelsTr.getOrElse(topClassId) { "?" }} -> ${labelsTr.getOrElse(votedClassId) { "?" }} " +
+                        "(${predictionHistory.count { it == votedClassId }}/${predictionHistory.size} oy)",
+                )
                 votedClassId
             } else {
                 topClassId
             }
 
-            // Top-3 (finalClassId'yi gercekten ilk siraya koy)
             val orderedClassIds = mutableListOf(finalClassId)
             probs.indices
                 .filter { it != finalClassId }
@@ -342,23 +418,65 @@ class SignPredictor(private val context: Context) {
                     labelTr = labelsTr.getOrElse(idx) { "Sinif $idx" },
                     labelEn = labelsEn.getOrElse(idx) { "Class $idx" },
                     confidence = probs[idx] * 100f,
-                    classId = idx
+                    classId = idx,
                 )
             }
 
             onPrediction?.invoke(top3)
-            Log.d("SignPredictor", "Tahmin: ${top3.firstOrNull()?.labelTr} %${top3.firstOrNull()?.confidence?.toInt()}")
-
+            selectionInterruptFrames = 0
+            digitSelectionPredictor.startSelection(top3)
+            emitSelectionState()
+            val debugReason = when {
+                lowConfidence && ambiguous -> {
+                    "Dusuk guven ve belirsiz tahmin, yine de top-3 gosteriliyor"
+                }
+                lowConfidence -> {
+                    "Dusuk guvenli tahmin, top-3 gosteriliyor"
+                }
+                ambiguous -> {
+                    "Belirsiz tahmin, top-3 gosteriliyor"
+                }
+                else -> {
+                    "1-2-3 ile secim bekleniyor"
+                }
+            }
+            onDebug?.invoke(debugReason)
+            Log.d(
+                "SignPredictor",
+                "Tahmin: ${top3.firstOrNull()?.labelTr} %${top3.firstOrNull()?.confidence?.toInt()}",
+            )
         } catch (e: Exception) {
-            val msg = "❌ Tahmin hatası: ${e.javaClass.simpleName}: ${e.message}"
+            val msg = "Tahmin hatasi: ${e.javaClass.simpleName}: ${e.message}"
             Log.e("SignPredictor", msg)
             onDebug?.invoke(msg)
         }
     }
 
+    private fun temperatureSoftmax(scores: FloatArray, temperature: Float): FloatArray {
+        val maxScore = scores.maxOrNull() ?: 0f
+        val expScores = FloatArray(scores.size)
+        var sumExp = 0f
+
+        for (i in scores.indices) {
+            val expValue = kotlin.math.exp(((scores[i] - maxScore) / temperature).toDouble()).toFloat()
+            expScores[i] = expValue
+            sumExp += expValue
+        }
+
+        if (sumExp <= 0f) {
+            return FloatArray(scores.size) { 1f / scores.size }
+        }
+
+        return FloatArray(scores.size) { index -> expScores[index] / sumExp }
+    }
+
+    private fun emitSelectionState() {
+        onSelectionStateChange?.invoke(digitSelectionPredictor.getState())
+    }
+
     private fun hasHandLandmarks(frame: FloatArray): Boolean {
         var handMagnitude = 0f
-        for (i in 132 until FEATURE_SIZE) {
+        for (i in 132 until featureSize) {
             handMagnitude += abs(frame[i])
         }
         return handMagnitude > 0.1f

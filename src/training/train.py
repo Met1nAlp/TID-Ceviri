@@ -32,8 +32,13 @@ from src.training.config import (
 )
 from src.data.dataset import get_dataloaders
 from src.models.hybrid_model import get_model
-from src.models.simple_model import get_simple_model
 from src.models.ultra_simple import get_ultra_simple_model
+from src.training.focus import build_weighted_training_config, load_focus_bundle
+
+try:
+    from src.models.simple_model import get_simple_model
+except ImportError:
+    get_simple_model = None
 
 
 class Trainer:
@@ -46,13 +51,20 @@ class Trainer:
         val_loader,
         device: str = DEVICE,
         use_amp: bool = USE_AMP,
-        experiment_name: str = None
+        experiment_name: str = None,
+        criterion: nn.Module | None = None,
+        learning_rate: float = LEARNING_RATE,
+        weight_decay: float = WEIGHT_DECAY,
+        focus_class_ids: list[int] | None = None,
     ):
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
         self.use_amp = use_amp
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.focus_class_ids = sorted(set(focus_class_ids or []))
         
         # Experiment name
         if experiment_name is None:
@@ -60,13 +72,13 @@ class Trainer:
         self.experiment_name = experiment_name
         
         # Loss function (no label smoothing for better initial learning)
-        self.criterion = nn.CrossEntropyLoss()
+        self.criterion = criterion if criterion is not None else nn.CrossEntropyLoss()
         
         # Optimizer
         self.optimizer = optim.AdamW(
             self.model.parameters(),
-            lr=LEARNING_RATE,
-            weight_decay=WEIGHT_DECAY
+            lr=learning_rate,
+            weight_decay=weight_decay
         )
         
         # Learning rate scheduler - reduce on plateau (based on val loss)
@@ -95,6 +107,7 @@ class Trainer:
             'train_acc': [],
             'val_loss': [],
             'val_acc': [],
+            'val_focus_acc': [],
             'lr': []
         }
     
@@ -174,6 +187,8 @@ class Trainer:
         
         # For top-3 accuracy
         top3_correct = 0
+        focus_correct = 0
+        focus_total = 0
         
         pbar = tqdm(self.val_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS} [Val]")
         
@@ -208,6 +223,14 @@ class Trainer:
             for i in range(labels.size(0)):
                 if labels[i] in top3_pred[i]:
                     top3_correct += 1
+
+            if self.focus_class_ids:
+                focus_mask = torch.zeros_like(labels, dtype=torch.bool)
+                for class_id in self.focus_class_ids:
+                    focus_mask |= labels == class_id
+                if focus_mask.any():
+                    focus_total += int(focus_mask.sum().item())
+                    focus_correct += int(predicted[focus_mask].eq(labels[focus_mask]).sum().item())
             
             pbar.set_postfix({
                 'loss': f"{total_loss/(batch_idx+1):.4f}",
@@ -218,7 +241,8 @@ class Trainer:
         accuracy = 100. * correct / total
         top3_accuracy = 100. * top3_correct / total
         
-        return avg_loss, accuracy, top3_accuracy
+        focus_accuracy = 100. * focus_correct / focus_total if focus_total else None
+        return avg_loss, accuracy, top3_accuracy, focus_accuracy
     
     def save_checkpoint(self, epoch: int, is_best: bool = False):
         """Save model checkpoint"""
@@ -228,7 +252,8 @@ class Trainer:
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'best_val_acc': self.best_val_acc,
-            'history': self.history
+            'history': self.history,
+            'focus_class_ids': self.focus_class_ids,
         }
         
         # Save latest
@@ -257,8 +282,8 @@ class Trainer:
         
         # Override LR with current config value (for fine-tuning)
         for param_group in self.optimizer.param_groups:
-            param_group['lr'] = LEARNING_RATE
-        print(f"Overriding LR to {LEARNING_RATE} from config")
+            param_group['lr'] = self.learning_rate
+        print(f"Overriding LR to {self.learning_rate} from current run config")
         
         return checkpoint['epoch']
     
@@ -285,7 +310,7 @@ class Trainer:
             train_loss, train_acc = self.train_epoch(epoch)
             
             # Validation
-            val_loss, val_acc, top3_acc = self.validate(epoch)
+            val_loss, val_acc, top3_acc, focus_acc = self.validate(epoch)
             
             # Update learning rate (ReduceLROnPlateau needs val_loss)
             self.scheduler.step(val_loss)
@@ -296,6 +321,7 @@ class Trainer:
             self.history['train_acc'].append(train_acc)
             self.history['val_loss'].append(val_loss)
             self.history['val_acc'].append(val_acc)
+            self.history['val_focus_acc'].append(focus_acc)
             self.history['lr'].append(current_lr)
             
             # Tensorboard logging
@@ -308,6 +334,8 @@ class Trainer:
                 'val': val_acc,
                 'val_top3': top3_acc
             }, epoch)
+            if focus_acc is not None:
+                self.writer.add_scalar('Accuracy/val_focus', focus_acc, epoch)
             self.writer.add_scalar('Learning Rate', current_lr, epoch)
             
             # Epoch summary
@@ -315,6 +343,8 @@ class Trainer:
             print(f"\nEpoch {epoch+1}/{num_epochs} ({epoch_time:.1f}s)")
             print(f"  Train - Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%")
             print(f"  Val   - Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%, Top-3: {top3_acc:.2f}%")
+            if focus_acc is not None:
+                print(f"  Focus - Val Acc: {focus_acc:.2f}% on {len(self.focus_class_ids)} class(es)")
             print(f"  LR: {current_lr:.6f}")
             
             # Check for improvement
@@ -355,6 +385,30 @@ def main():
                        help="Path to checkpoint to resume from")
     parser.add_argument("--name", type=str, default=None,
                        help="Experiment name")
+    parser.add_argument("--learning-rate", type=float, default=LEARNING_RATE,
+                       help="Learning rate (use a lower one for fine-tuning)")
+    parser.add_argument("--weight-decay", type=float, default=WEIGHT_DECAY,
+                       help="Weight decay")
+    parser.add_argument("--focus-analysis-report", type=str, default=None,
+                       help="Path to analyze_benchmark_report JSON output")
+    parser.add_argument("--focus-actions", type=str, nargs="+", default=["targeted_finetune"],
+                       help="Recommended actions to include from the analysis report")
+    parser.add_argument("--focus-top-n", type=int, default=12,
+                       help="How many high-priority classes to focus")
+    parser.add_argument("--include-confusion-partners", action="store_true",
+                       help="Also boost the dominant confusion partners for each focus class")
+    parser.add_argument("--focus-sample-boost", type=float, default=3.0,
+                       help="Weighted sampler multiplier for focus classes")
+    parser.add_argument("--partner-sample-boost", type=float, default=1.75,
+                       help="Weighted sampler multiplier for confusion partners")
+    parser.add_argument("--focus-loss-boost", type=float, default=2.0,
+                       help="Cross-entropy class-weight multiplier for focus classes")
+    parser.add_argument("--partner-loss-boost", type=float, default=1.35,
+                       help="Cross-entropy class-weight multiplier for confusion partners")
+    parser.add_argument("--focus-only-train", action="store_true",
+                       help="Restrict the training split to focus classes and selected partners")
+    parser.add_argument("--auto-resume-best", action="store_true",
+                       help="If no --resume is given, continue from models/best_model.pth when it exists")
     args = parser.parse_args()
     
     print("\n" + "=" * 60)
@@ -364,17 +418,65 @@ def main():
     print(f"Device: {DEVICE}")
     print(f"Epochs: {args.epochs}")
     print(f"Batch size: {args.batch_size}")
+    print(f"Learning rate: {args.learning_rate}")
     print("=" * 60 + "\n")
-    
+
+    focus_bundle = None
+    train_allowed_class_ids = None
+    train_sample_weight_map = None
+    criterion = None
+
+    if args.focus_analysis_report:
+        focus_bundle = load_focus_bundle(
+            analysis_report_path=args.focus_analysis_report,
+            actions=args.focus_actions,
+            top_n=args.focus_top_n,
+            include_confusion_partners=args.include_confusion_partners,
+        )
+        weighted_config = build_weighted_training_config(
+            num_classes=NUM_CLASSES,
+            focus_class_ids=focus_bundle["focus_class_ids"],
+            partner_class_ids=focus_bundle["partner_class_ids"],
+            focus_sample_boost=args.focus_sample_boost,
+            partner_sample_boost=args.partner_sample_boost,
+            focus_loss_boost=args.focus_loss_boost,
+            partner_loss_boost=args.partner_loss_boost,
+            device=DEVICE,
+        )
+        train_sample_weight_map = weighted_config["sample_weight_map"]
+        criterion = nn.CrossEntropyLoss(weight=weighted_config["loss_weights"])
+
+        if args.focus_only_train:
+            train_allowed_class_ids = set(focus_bundle["focus_class_ids"]) | set(
+                focus_bundle["partner_class_ids"]
+            )
+
+        print("Focus fine-tune aktif")
+        print(f"  Kaynak rapor: {focus_bundle['report_path']}")
+        print(f"  Aksiyonlar : {', '.join(focus_bundle['actions'])}")
+        print(f"  Hedef sinif: {len(focus_bundle['focus_class_ids'])}")
+        print(f"  Partner    : {len(focus_bundle['partner_class_ids'])}")
+
+    resume_path = args.resume
+    if resume_path is None and (args.auto_resume_best or args.focus_analysis_report):
+        best_model_path = MODEL_DIR / "best_model.pth"
+        if best_model_path.exists():
+            resume_path = str(best_model_path)
+            print(f"Resume otomatik ayarlandi: {resume_path}")
+
     # Get dataloaders
     mode = "landmarks" if args.model in ["landmark_only", "simple", "mlp", "lstm"] else "hybrid"
     train_loader, val_loader, _ = get_dataloaders(
         mode=mode,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        train_allowed_class_ids=train_allowed_class_ids,
+        train_sample_weight_map=train_sample_weight_map,
     )
     
     # Get model
     if args.model == "simple":
+        if get_simple_model is None:
+            raise ImportError("src.models.simple_model bulunamadi. simple modeli kullanmayin.")
         model = get_simple_model()
     elif args.model == "mlp":
         model = get_ultra_simple_model("mlp")
@@ -388,10 +490,14 @@ def main():
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
-        experiment_name=args.name
+        experiment_name=args.name,
+        criterion=criterion,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        focus_class_ids=(focus_bundle["focus_class_ids"] if focus_bundle else None),
     )
     
-    trainer.train(num_epochs=args.epochs, resume_from=args.resume)
+    trainer.train(num_epochs=args.epochs, resume_from=resume_path)
 
 
 if __name__ == "__main__":
