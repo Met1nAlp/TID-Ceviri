@@ -30,17 +30,17 @@ class SignPredictor(private val context: Context) {
     private val maxRawSignFrames = 72
 
     // Segmentation thresholds aligned with the desktop/web path.
-    private val motionThreshold = 0.008f
-    private val idleThreshold = 0.006f
-    private val minSignFrames = 15
+    private val motionThreshold = 0.0095f
+    private val idleThreshold = 0.0085f    // yükseltildi → idle daha kolay algılanır → kayıt kısalır
+    private val minSignFrames = 12         // 15→12: kısa işaretler de tahmin edilir
     private val minDecisionFrames = minSignFrames
-    private val idleFramesToStop = 7
+    private val idleFramesToStop = 6       // 8→6: ~200ms bekleme → kayıt daha hızlı durur
     private val startFrames = 2
     private val minConfidence = 40f
 
     // Temperature scaling + margin filter aligned with the desktop path.
-    private val temperature = 1.5f
-    private val marginThreshold = 0.15f
+    private val temperature = 0.5f         // 0.6→0.5: daha keskin güven dağılımı
+    private val marginThreshold = 0.10f
     private val minHandFramesDivisor = 8
 
     // Pre-buffer helps keep the beginning of the sign.
@@ -52,11 +52,11 @@ class SignPredictor(private val context: Context) {
     private val predictionHistory = mutableListOf<Int>()
 
     // Cooldown avoids immediate double-triggering.
-    private val cooldownFrames = 20
+    private val cooldownFrames = 25        // 20→25
     private val selectionCooldownFrames = 12
-    private val selectionInterruptRequiredFrames = 4
-    private val selectionInterruptMotionThreshold = 0.0115f
-    private val trailingIdleKeepFrames = 2
+    private val selectionInterruptRequiredFrames = 8   // 4→8: 8 kare (ȧ270ms) aşan hareket lazım
+    private val selectionInterruptMotionThreshold = 0.025f  // 0.0115→0.025: sadece net yeni işaret hareketi iptal eder
+    private val trailingIdleKeepFrames = 0  // 2→0: sondaki boş kareler kırpılmaz
     private val poseMotionIndices = intArrayOf(11, 12, 13, 14, 15, 16)
     private var cooldownCounter = 0
     private var selectionInterruptFrames = 0
@@ -240,7 +240,13 @@ class SignPredictor(private val context: Context) {
             }
         }
 
-        prevLandmarks = landmarks.copyOf()
+        // El görünüyorsa güncelle; yoksa son bilinen konumu koru.
+        // Eller döndüğünde sıfır koordinat vs eski konum = büyük sahte hareket oluşmaz.
+        if (hasHandLandmarks(landmarks)) {
+            prevLandmarks = landmarks.copyOf()
+        } else if (prevLandmarks == null) {
+            prevLandmarks = landmarks.copyOf()
+        }
     }
 
     private fun loadModel() {
@@ -270,18 +276,29 @@ class SignPredictor(private val context: Context) {
         val leftHandEnd = 195
         val rightHandEnd = minOf(258, landmarks.size)
 
-        var leftSum = 0f
-        for (i in handStart until leftHandEnd) {
-            leftSum += abs(landmarks[i] - prev[i])
-        }
-        val leftMotion = leftSum / (leftHandEnd - handStart)
+        // Bug fix: el kameradan çekilince koordinatlar sıfıra düşer.
+        // Sıfır vs önceki konum = büyük sahte "hareket" → idle algılanmaz.
+        // Çözüm: hem şu an hem önceki frame'de el varsa hesapla, yoksa 0.
+        val currHasHands = hasHandLandmarks(landmarks)
+        val prevHasHands = hasHandLandmarks(prev)
 
-        var rightSum = 0f
-        for (i in leftHandEnd until rightHandEnd) {
-            rightSum += abs(landmarks[i] - prev[i])
+        val handMotion = if (currHasHands && prevHasHands) {
+            var leftSum = 0f
+            for (i in handStart until leftHandEnd) {
+                leftSum += abs(landmarks[i] - prev[i])
+            }
+            val leftMotion = leftSum / (leftHandEnd - handStart)
+
+            var rightSum = 0f
+            for (i in leftHandEnd until rightHandEnd) {
+                rightSum += abs(landmarks[i] - prev[i])
+            }
+            val rightMotion = rightSum / (rightHandEnd - leftHandEnd)
+            maxOf(leftMotion, rightMotion)
+        } else {
+            // El yok → hareketsiz say → idle_frames sayacı artar → kayıt durur
+            0f
         }
-        val rightMotion = rightSum / (rightHandEnd - leftHandEnd)
-        val handMotion = maxOf(leftMotion, rightMotion)
 
         var poseSum = 0f
         var poseCount = 0

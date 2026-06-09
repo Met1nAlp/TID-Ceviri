@@ -3,6 +3,7 @@ PyTorch predictor for the web application.
 """
 
 import json
+import time
 import sys
 import urllib.request
 from collections import deque
@@ -90,15 +91,15 @@ class PyTorchPredictor:
             CONFIDENCE_THRESHOLD if confidence_threshold is None else confidence_threshold
         )
 
-        self.TEMPERATURE = 1.5
-        self.MARGIN_THRESHOLD = 0.15
+        self.TEMPERATURE = 0.6
+        self.MARGIN_THRESHOLD = 0.10
         self.MIN_HAND_FRAMES_DIVISOR = 8
         self.PRE_BUFFER_SIZE = 8
         self.pre_buffer = deque(maxlen=self.PRE_BUFFER_SIZE)
         self.VOTE_HISTORY_SIZE = 3
         self.prediction_history = []
-        self.COOLDOWN_FRAMES = 20
-        self.TRAILING_IDLE_KEEP_FRAMES = 2
+        self.COOLDOWN_FRAMES = 25
+        self.TRAILING_IDLE_KEEP_FRAMES = 0
         self.cooldown_counter = 0
         self.last_debug = {
             "state": self.state,
@@ -124,7 +125,7 @@ class PyTorchPredictor:
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
         models = {
-            "pose_landmarker_heavy.task": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task",
+            "pose_landmarker_lite.task": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
             "hand_landmarker.task": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task",
         }
 
@@ -138,7 +139,7 @@ class PyTorchPredictor:
         if self.use_video_landmarkers:
             pose_options = vision.PoseLandmarkerOptions(
                 base_options=python.BaseOptions(
-                    model_asset_path=str(self.model_dir / "pose_landmarker_heavy.task")
+                    model_asset_path=str(self.model_dir / "pose_landmarker_lite.task")
                 ),
                 running_mode=vision.RunningMode.VIDEO,
                 num_poses=1,
@@ -159,7 +160,7 @@ class PyTorchPredictor:
         else:
             pose_options = vision.PoseLandmarkerOptions(
                 base_options=python.BaseOptions(
-                    model_asset_path=str(self.model_dir / "pose_landmarker_heavy.task")
+                    model_asset_path=str(self.model_dir / "pose_landmarker_lite.task")
                 ),
                 running_mode=vision.RunningMode.IMAGE,
                 num_poses=1,
@@ -201,7 +202,7 @@ class PyTorchPredictor:
         mp_image = mp_Image(image_format=ImageFormat.SRGB, data=rgb_frame)
 
         if self.use_video_landmarkers:
-            self.timestamp_ms += 33
+            self.timestamp_ms = int(time.time() * 1000)
             pose_result = self.pose_landmarker.detect_for_video(mp_image, self.timestamp_ms)
             hand_result = self.hand_landmarker.detect_for_video(mp_image, self.timestamp_ms)
         else:
@@ -369,7 +370,13 @@ class PyTorchPredictor:
 
     def _compute_motion(self, landmarks):
         motion = self.preview_motion(landmarks)
-        self.prev_landmarks = landmarks.copy()
+        # El görünüyorsa güncelle; görünmüyorsa son bilinen konumu koru.
+        # Böylece eller döndüğünde hareket, sıfır koordinatlarla değil
+        # gerçek son pozisyonla karşılaştırılır.
+        if self._has_hand_landmarks(landmarks):
+            self.prev_landmarks = landmarks.copy()
+        elif self.prev_landmarks is None:
+            self.prev_landmarks = landmarks.copy()
         return motion
 
     def preview_motion(self, landmarks, previous_landmarks=None):
@@ -377,18 +384,28 @@ class PyTorchPredictor:
         if reference_landmarks is None:
             return 0.0
 
-        curr_hands = landmarks[132:]
-        prev_hands = reference_landmarks[132:]
-        left_motion = np.mean(np.abs(curr_hands[:63] - prev_hands[:63]))
-        right_motion = np.mean(np.abs(curr_hands[63:] - prev_hands[63:]))
-        hand_motion = max(left_motion, right_motion)
+        curr_has_hands = self._has_hand_landmarks(landmarks)
+        prev_has_hands = self._has_hand_landmarks(reference_landmarks)
+
+        if curr_has_hands and prev_has_hands:
+            # Her iki frame'de de el var → normal hareket hesapla
+            curr_hands = landmarks[132:]
+            prev_hands = reference_landmarks[132:]
+            left_motion  = np.mean(np.abs(curr_hands[:63] - prev_hands[:63]))
+            right_motion = np.mean(np.abs(curr_hands[63:] - prev_hands[63:]))
+            hand_motion  = max(left_motion, right_motion)
+        else:
+            # El şu an görünmüyor (veya yeni çıktı):
+            # Sıfır koordinat - önceki koordinat = büyük sahte "hareket" değeri üretir.
+            # Eli olmayan durumu hareketsiz say → idle_frames artar → kayıt durur.
+            hand_motion = 0.0
 
         pose_diffs = []
         for landmark_index in self.pose_motion_indices:
             base = landmark_index * 4
             pose_diffs.extend(
                 [
-                    abs(landmarks[base] - reference_landmarks[base]),
+                    abs(landmarks[base]     - reference_landmarks[base]),
                     abs(landmarks[base + 1] - reference_landmarks[base + 1]),
                     abs(landmarks[base + 2] - reference_landmarks[base + 2]),
                 ]
@@ -396,6 +413,7 @@ class PyTorchPredictor:
         pose_motion = float(np.mean(pose_diffs)) if pose_diffs else 0.0
 
         return max(hand_motion, pose_motion * 0.6)
+
 
     def process_frame(self, frame):
         landmarks, results = self.extract_landmarks(frame)

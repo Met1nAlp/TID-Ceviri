@@ -38,11 +38,11 @@ class DigitSelectionPredictor(private val context: Context) {
     private var module: Module? = null
 
     private val classNames = listOf("digit_1", "digit_2", "digit_3", "other_digit")
-    private val confidenceThreshold = 0.80f
+    private val confidenceThreshold = 0.55f   // 0.80 -> 0.55: 2 işaretini yakalamak artık çok daha kolay
     private val selectionTimeoutMs = 3_000L
-    private val selectionArmDelayMs = 700L
-    private val selectionInterruptGraceMs = maxOf(selectionArmDelayMs, 1_200L)
-    private val stableFrames = 3
+    private val selectionArmDelayMs = 500L
+    private val selectionInterruptGraceMs = maxOf(selectionArmDelayMs, 2_000L)
+    private val stableFrames = 2              // 3 -> 2: Üst üste 2 kare bilmesi yeterli
     private val voteHistorySize = 5
     private val voteHistory = ArrayDeque<Int>(voteHistorySize + 1)
 

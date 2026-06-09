@@ -137,7 +137,7 @@ class MainActivity : ComponentActivity() {
                     PoseLandmarker.PoseLandmarkerOptions.builder()
                         .setBaseOptions(
                             BaseOptions.builder()
-                                .setModelAssetPath("pose_landmarker_heavy.task")
+                                .setModelAssetPath("pose_landmarker_lite.task")
                                 .build(),
                         )
                         .setRunningMode(RunningMode.VIDEO)
@@ -355,9 +355,8 @@ class MainActivity : ComponentActivity() {
 }
 
 val POSE_CONNECTIONS = listOf(
-    0 to 1, 1 to 2, 2 to 3, 3 to 7, 0 to 4, 4 to 5, 5 to 6, 6 to 8,
-    9 to 10, 11 to 12, 11 to 13, 13 to 15, 12 to 14, 14 to 16,
-    11 to 23, 12 to 24, 23 to 24, 23 to 25, 24 to 26, 25 to 27, 26 to 28,
+    // Sadece üst gövde (Omuzlar, dirsekler, bilekler)
+    11 to 12, 11 to 13, 13 to 15, 12 to 14, 14 to 16,
 )
 
 val HAND_CONNECTIONS = listOf(
@@ -499,7 +498,12 @@ fun MainScreen(
                         )
                     }
                 }
-                landmarks.poseLandmarks.forEach { drawCircle(Color(0xFFFF6633), 4f, point(it)) }
+                landmarks.poseLandmarks.forEachIndexed { index, it ->
+                    // 11-22 arası sadece kollar ve omuzlardır. Yüzü ve bacakları çizmeyelim.
+                    if (index in 11..22) {
+                        drawCircle(Color(0xFFFF6633), 4f, point(it))
+                    }
+                }
 
                 for ((a, b) in HAND_CONNECTIONS) {
                     if (a < landmarks.leftHandLandmarks.size && b < landmarks.leftHandLandmarks.size) {
@@ -526,17 +530,7 @@ fun MainScreen(
                 landmarks.rightHandLandmarks.forEach { drawCircle(Color(0xFF3377FF), 5f, point(it)) }
             }
 
-            if (state.debugInfo.isNotEmpty()) {
-                Text(
-                    text = state.debugInfo,
-                    color = Color.Yellow,
-                    fontSize = 10.sp,
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .background(Color(0x88000000))
-                        .padding(4.dp),
-                )
-            }
+
         }
 
         Column(
@@ -552,10 +546,7 @@ fun MainScreen(
                 modifier = Modifier.padding(bottom = 6.dp),
             )
 
-            if (selection.active) {
-                SelectionPanel(selection = selection)
-                Spacer(modifier = Modifier.height(8.dp))
-            }
+
 
             if (state.predictions.isEmpty()) {
                 Box(

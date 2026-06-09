@@ -1,203 +1,214 @@
-# 🤟 DeepSign-TID — Türk İşaret Dili Tanıma Sistemi
-### Turkish Sign Language Recognition System
+# DeepSign-TID — Turk Isaret Dili Tanima Sistemi
 
-<p align="center">
-  <img src="training_plot.png" alt="Training Results" width="700"/>
-</p>
+Konya Teknik Universitesi - Bilgisayar Muhendisligi Bolumu  
+Bitirme Projesi, Haziran 2026
+
+**Ogrenci:** Metin KAYAALP  
+**Danisaman:** Prof. Dr. Ahmet BABALIK
 
 ---
 
-## 🇹🇷 Türkçe
+## Proje Hakkinda
 
-### 📌 Proje Hakkında
+DeepSign-TID, gercek zamanli Turk Isaret Dili (TID) tanima sistemidir. Kamera goruntulerinden el ve vucut hareketlerini algilayarak 226 farkli isareti taniyabilir, metne donusturebilir ve seslendirebilir. Sistem hem web tarayici uzerinden hem de Android mobil uygulama olarak calisabilmektedir.
 
-DeepSign-TID, gerçek zamanlı **Türk İşaret Dili (TİD)** tanıma sistemidir. Kamera görüntüsünden el ve vücut hareketlerini algılayarak 226 farklı işareti tanıyabilir ve cümle oluşturabilir.
+---
 
-### 🏆 Sonuçlar
+## Sistem Gereksinimleri
 
-| Model | Doğruluk | Top-3 | Epoch |
-|-------|----------|-------|-------|
-| MLP (Baseline) | %69.94 | %88.16 | 80 |
-| **LSTM (Final)** | **%78.36** | **%91.40** | 60 |
+| Gereksinim | Minimum |
+|------------|---------|
+| Isletim Sistemi | Windows 10/11 |
+| Python | 3.10 veya ustu |
+| RAM | 8 GB |
+| GPU (opsiyonel) | CUDA destekli NVIDIA GPU (egitim icin onerilir) |
+| Kamera | Web kamerasi (canli tanima icin) |
+| Disk Alani | ~2 GB (veri seti haric) |
 
-- **226 sınıf** üzerinde %78.36 doğruluk
-- **Top-3 %91.40** → Neredeyse her zaman doğru tahmin ilk 3'te
-- Early stopping ile gereksiz eğitim önlendi
+---
 
-### 🔧 Teknik Detaylar
+## Kurulum
 
-**Model Mimarisi (SimpleLSTM):**
-- 2 katmanlı çift yönlü (bidirectional) LSTM
-- Attention pooling (tüm zaman adımlarında ağırlıklı ortalama)
-- LayerNorm + Dropout (0.5) ile güçlü regularization
-- ~2.8M parametre
+### 1. Python Ortaminin Hazirlanmasi
 
-**Veri İşleme:**
-- Veri seti: [AUTSL](https://cvml.ankara.edu.tr/datasets/) (226 sınıf, ~35.000 video)
-- MediaPipe Tasks API ile landmark çıkarımı
-- Her frame: 258 özellik (33 vücut × 4 + 21 sol el × 3 + 21 sağ el × 3)
-- Sekans uzunluğu: 48 frame (~1.6 saniye)
+Anaconda veya standart Python kurulumu kullanilabilir.
 
-**Web Uygulaması:**
-- Hareket tabanlı işaret segmentasyonu (sürekli tahmin yerine)
-- Gerçek zamanlı landmark görselleştirme
-- Flask + OpenCV + MediaPipe Tasks API
-
-### 🚀 Hızlı Başlangıç
+**Anaconda ile (onerilen):**
 
 ```bash
-# 1. Conda ortamını aktifle (GPU desteği için)
-conda activate base
-
-# 2. Projeyi başlat
-python run.py
-# Seçenek 4: Web Application
-
-# 3. Tarayıcıda aç
-# http://localhost:5000
+conda create -n deepsign python=3.13
+conda activate deepsign
 ```
 
-### 📁 Proje Yapısı
+**Standart Python ile:**
+
+```bash
+python -m venv venv
+venv\Scripts\activate
+```
+
+### 2. Bagimliliklarin Kurulmasi
+
+```bash
+pip install -r requirements.txt
+```
+
+PyTorch GPU destegi isteniyorsa (NVIDIA GPU icin):
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+```
+
+GPU yoksa CPU surumu otomatik olarak kurulacaktir, sistem CPU ile de calisir.
+
+### 3. Veri Seti (Sadece Egitim Icin Gerekli)
+
+AUTSL veri seti asagidaki adresten indirilebilir:
+
+- Kaynak: https://cvml.ankara.edu.tr/datasets/
+- Indirilen videolar `AUTSL/train/`, `AUTSL/val/`, `AUTSL/test/` klasorlerine yerlestirilmelidir.
+
+**Not:** Veri seti yalnizca modeli sifirdan egitmek icin gereklidir. Onceden egitilmis model dosyalari (`models/` klasoru) projeye dahil edilmistir; dogrudan calistirmak icin veri setine gerek yoktur.
+
+---
+
+## Calistirma
+
+### Web Uygulamasi (Onerilen)
+
+```bash
+python run.py
+```
+
+Acilan menuden **4 numarali secenegi** (Web Application) secin. Tarayicinizda asagidaki adresi acin:
+
+```
+http://localhost:5000
+```
+
+Kameraniza dogru isaret yapin. Sistem hareketi otomatik olarak algilayacak, tahmini ekranda gosterecektir.
+
+### Diger Secenekler
+
+`run.py` icerisindeki menu:
+
+| Secenek | Aciklama |
+|---------|----------|
+| 1 | Veri on isleme (MediaPipe ile anahtar nokta cikarimi) |
+| 2 | Model egitimi |
+| 3 | Masaustu gercek zamanli tanima (OpenCV penceresi) |
+| 4 | Web uygulamasi (tarayici uzerinden) |
+| 5 | Tum adimlari sirayla calistir (1 > 2 > 4) |
+
+---
+
+## Proje Yapisi
 
 ```
 DeepSign-TID/
-├── app/
-│   ├── server.py              # Flask web sunucusu
-│   ├── pytorch_predictor.py   # PyTorch + MediaPipe entegrasyonu
-│   ├── templates/             # HTML şablonları
-│   └── static/                # CSS/JS dosyaları
-├── src/
-│   ├── data/
-│   │   ├── preprocess.py      # MediaPipe landmark çıkarımı
-│   │   └── dataset.py         # PyTorch Dataset sınıfı
-│   ├── models/
-│   │   ├── ultra_simple.py    # MLP ve LSTM modelleri
-│   │   └── hybrid_model.py    # Hibrit model (GRU + CNN)
-│   └── training/
-│       ├── train.py           # Eğitim scripti
-│       └── config.py          # Hiperparametreler
-├── models/
-│   └── best_model.pth         # Eğitilmiş LSTM modeli (%78.36)
-├── training_plot.png          # Eğitim grafiği
-├── run.py                     # Ana başlatıcı
-└── requirements.txt
-```
-
-### ⚙️ Gereksinimler
-
-```bash
-pip install -r requirements.txt
-```
-
-| Paket | Versiyon |
-|-------|----------|
-| Python | 3.13+ |
-| PyTorch | 2.7.1+cu118 |
-| MediaPipe | 0.10.31 |
-| Flask | 3.x |
-| OpenCV | 4.x |
-| NumPy | 1.x |
-
-### 🎯 Kullanım
-
-1. Web uygulamasını başlat
-2. Kameraya doğru işaret yap
-3. El hareketi algılandığında sistem otomatik kayıt başlatır
-4. İşaret tamamlandığında tahmin gösterilir
-5. Kelimeyi cümleye ekle
-
----
-
-## 🇬🇧 English
-
-### 📌 About
-
-DeepSign-TID is a real-time **Turkish Sign Language (TİD)** recognition system. It detects hand and body movements from a camera feed and can recognize 226 different signs to build sentences.
-
-### 🏆 Results
-
-| Model | Accuracy | Top-3 | Epochs |
-|-------|----------|-------|--------|
-| MLP (Baseline) | 69.94% | 88.16% | 80 |
-| **LSTM (Final)** | **78.36%** | **91.40%** | 60 |
-
-- **78.36% accuracy** across 226 sign classes
-- **91.40% Top-3** → Correct sign almost always in top 3 predictions
-- Early stopping prevented overfitting
-
-### 🔧 Technical Details
-
-**Model Architecture (SimpleLSTM):**
-- 2-layer bidirectional LSTM
-- Attention pooling over all timesteps
-- LayerNorm + Dropout (0.5) for strong regularization
-- ~2.8M parameters
-
-**Data Pipeline:**
-- Dataset: [AUTSL](https://cvml.ankara.edu.tr/datasets/) (226 classes, ~35,000 videos)
-- Landmark extraction via MediaPipe Tasks API
-- Per frame: 258 features (33 pose × 4 + 21 left hand × 3 + 21 right hand × 3)
-- Sequence length: 48 frames (~1.6 seconds)
-
-**Web Application:**
-- Motion-based sign segmentation (predicts only on complete gestures)
-- Real-time landmark visualization
-- Flask + OpenCV + MediaPipe Tasks API
-
-### 🚀 Quick Start
-
-```bash
-# 1. Activate conda environment (for GPU support)
-conda activate base
-
-# 2. Launch the app
-python run.py
-# Select option 4: Web Application
-
-# 3. Open in browser
-# http://localhost:5000
-```
-
-### ⚙️ Requirements
-
-```bash
-pip install -r requirements.txt
-```
-
-| Package | Version |
-|---------|---------|
-| Python | 3.13+ |
-| PyTorch | 2.7.1+cu118 |
-| MediaPipe | 0.10.31 |
-| Flask | 3.x |
-| OpenCV | 4.x |
-| NumPy | 1.x |
-
-### 🎯 How to Use
-
-1. Start the web application
-2. Face the camera and perform a sign
-3. System automatically starts recording when hand movement is detected
-4. Prediction is shown when the sign is complete
-5. Add the word to your sentence
-
-### 📊 Training Your Own Model
-
-```bash
-# Train LSTM model from scratch
-python src/training/train.py --model lstm --epochs 100
-
-# Resume from checkpoint
-python src/training/train.py --model lstm --epochs 50 --resume models/best_model.pth
+|
+|-- src/                          # Kaynak kod
+|   |-- data/
+|   |   |-- preprocess.py         # MediaPipe ile videodan anahtar nokta cikarimi
+|   |   |-- dataset.py            # PyTorch Dataset sinifi ve veri artirma
+|   |-- models/
+|   |   |-- ultra_simple.py       # MLP ve BiLSTM model tanimlari
+|   |   |-- hybrid_model.py       # Hibrit model (GRU + CNN)
+|   |-- training/
+|   |   |-- train.py              # Model egitim scripti
+|   |   |-- config.py             # Hiperparametre ayarlari
+|   |   |-- focus.py              # Focal loss fonksiyonu
+|   |-- inference/
+|   |   |-- realtime.py           # Gercek zamanli cikarim ve kayan pencere yontemi
+|   |-- digit_selection/          # Parmak secimi alt modulu
+|
+|-- app/                          # Web uygulamasi
+|   |-- server.py                 # Flask web sunucusu
+|   |-- pytorch_predictor.py      # TID tahmin motoru (MediaPipe + BiLSTM)
+|   |-- digit_selection_predictor.py  # Parmak secimi tahmin motoru
+|   |-- templates/index.html      # Web arayuzu
+|   |-- static/                   # CSS ve JavaScript dosyalari
+|
+|-- android/                      # Android mobil uygulama (Kotlin/Jetpack Compose)
+|
+|-- models/                       # Egitilmis model dosyalari
+|   |-- best_model.pth            # Ana BiLSTM modeli (~34 MB, %78.36 dogruluk)
+|   |-- best_model_mobile.ptl     # Mobil format (PyTorch Lite, ~11 MB)
+|   |-- digit_selection_best.pth  # Parmak secimi modeli
+|   |-- digit_selection_mobile.ptl # Parmak secimi mobil modeli
+|
+|-- AUTSL/                        # AUTSL veri seti (train/val/test videolari ve CSV etiketleri)
+|-- processed_data/               # On islemden gecmis anahtar nokta verileri
+|-- external_data/                # Ek veri seti (isaret dili rakam veri seti)
+|
+|-- run.py                        # Ana baslatici
+|-- requirements.txt              # Python bagimliliklari
+|-- benchmark_live_pipeline.py    # Canli pipeline basarim testi
+|-- analyze_benchmark_report.py   # Benchmark sonuc analiz scripti
+|-- export_mobile_model.py        # Modeli mobil formata donusturme
+|-- training_plot.png             # Egitim grafigi (dogruluk ve kayip egrileri)
+|-- training_mobile_plot.png      # Mobil model egitim grafigi
 ```
 
 ---
 
-## 📜 License / Lisans
+## Teknik Detaylar
+
+### Model Mimarisi
+
+- 2 katmanli cift yonlu LSTM (BiLSTM)
+- Attention pooling (tum zaman adimlarinda agirlikli ortalama)
+- Katman normallestirme (LayerNorm) ve seyreltme (Dropout 0.5)
+- Yaklasik 2.8 milyon parametre
+
+### Veri Isleme
+
+- Veri seti: AUTSL (226 sinif, yaklasik 38.000 video)
+- Her video karesinden MediaPipe ile 258 boyutlu anahtar nokta vektoru cikarilir
+  - 33 vucut noktasi x 4 koordinat + 21 sol el x 3 + 21 sag el x 3
+- Zaman ekseni 48 kare olarak sabitlenir (~1.6 saniye)
+
+### Mobil Entegrasyon
+
+- Model PyTorch Lite formatina (~10.9 MB) donusturulmustur
+- Android uygulamasi Kotlin ve Jetpack Compose ile gelistirilmistir
+- CameraX ile goruntu alimi, Android TTS ile seslendirme yapilir
+- Sunucu bagimliligi olmadan cihaz uzerinde calisir
+
+---
+
+## Sonuclar
+
+| Olcut | Dogrulama | Canli Benchmark |
+|-------|-----------|-----------------|
+| Ilk-1 Dogruluk | %78.36 | %50.44 |
+| Ilk-3 Dogruluk | ~%90+ | %69.03 |
+| Kapsama Orani | - | %100 |
+
+- 226 sinif uzerinde %78.36 dogruluk elde edilmistir.
+- Ilk-3 dogruluk %91.40 ile neredeyse her zaman dogru tahmini icermektedir.
+- Canli benchmark, 452 video uzerinde gercek kosullarda degerlendirilmistir.
+
+---
+
+## Sik Karsilasilan Sorunlar
+
+| Sorun | Cozum |
+|-------|-------|
+| `ModuleNotFoundError: No module named 'torch'` | `pip install -r requirements.txt` komutunu calistirin |
+| Kamera acilmiyor | Baska bir uygulama kamerayi kullaniyor olabilir, kapatin ve tekrar deneyin |
+| CUDA hatasi | GPU suruculerinizi guncelleyin veya CPU modunda calistirin (GPU zorunlu degildir) |
+| Web sayfasi acilmiyor | `http://localhost:5000` adresini kullandiginizdan emin olun |
+| Model dosyasi bulunamadi | `models/` klasorunun proje dizininde oldugunu kontrol edin |
+
+---
+
+## Lisans
 
 MIT License
 
-## 🙏 Acknowledgements / Teşekkürler
+## Kaynaklar
 
-- [AUTSL Dataset](https://cvml.ankara.edu.tr/datasets/) — Ankara Üniversitesi
-- [MediaPipe](https://mediapipe.dev/) — Google
+- AUTSL Dataset - Ankara Universitesi (https://cvml.ankara.edu.tr/datasets/)
+- MediaPipe - Google (https://mediapipe.dev/)
+- PyTorch (https://pytorch.org/)
